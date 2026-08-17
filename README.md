@@ -173,19 +173,18 @@ git push
 ### 完整流程圖
 
 ```mermaid
-flowchart TD
-    A[開始開發] --> B{本地有未 commit 的改動？}
-    B -- 有 --> C[git stash 或 git commit]
-    C --> D[clasp pull]
-    B -- 沒有 --> D
-    D --> E[本地修改程式碼]
-    E --> F[clasp status 確認檔案]
-    F --> G[clasp push 推上 GAS]
-    G --> H{線上測試通過？}
-    H -- 沒過 --> E
-    H -- 通過 --> I[git add + git commit]
-    I --> J[git push]
-    J --> K[完成]
+sequenceDiagram
+    participant Dev as 本地開發
+    participant GAS as Google Apps Script
+    participant Git as GitHub
+
+    Dev->>GAS: clasp pull（拉最新）
+    Note over Dev: 修改程式碼
+    Dev->>Dev: clasp status（確認檔案）
+    Dev->>GAS: clasp push（推上 GAS）
+    Note over GAS: 線上測試驗證
+    GAS-->>Dev: 測試沒過 → 回頭修改
+    Dev->>Git: git add + commit + push
 ```
 
 ### 注意事項
