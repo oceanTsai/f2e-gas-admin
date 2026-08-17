@@ -1,0 +1,12 @@
+{
+  "name": "f2e-gas-admin",
+  "private": true,
+  "scripts": {
+    "login": "clasp login",
+    "push:all": "echo '尚未加入專案'",
+    "pull:all": "echo '尚未加入專案'"
+  },
+  "devDependencies": {
+    "@google/clasp": "^3.3.0"
+  }
+}
