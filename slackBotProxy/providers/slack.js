@@ -84,10 +84,12 @@ const SlackProvider = {
       },
       {
         type: 'section',
+        // 固定 block_id：定案某題時要就地更新這行的進度（0/2 → 1/2 → 全部完成）
+        block_id: 'decision_progress',
         text: {
           type: 'mrkdwn',
-          text: '*執行階段*：`' + ctx.phase + '`\n共 *' + questions.length + '* 題待決議，' +
-                '**每題都回答完**才會接續後續流程。'
+          text: '*執行階段*：`' + ctx.phase + '`\n共 *' + questions.length + '* 題待決議（已回答 0／' +
+                questions.length + '），**每題都回答完**才會接續後續流程。'
         }
       },
       { type: 'divider' }
@@ -170,10 +172,20 @@ const SlackProvider = {
       }
     };
 
+    // 進度行：答完一題就就地更新，讓人不必自己數還剩幾題（不額外發訊息，
+    // 才不會增加 Slack 3 秒預算內的 API 呼叫次數）
+    const progressSection = info.progressText ? {
+      type: 'section',
+      block_id: 'decision_progress',
+      text: { type: 'mrkdwn', text: info.progressText }
+    } : null;
+
     let blocks = info.blocks;
     if (blocks && blocks.length) {
       blocks = blocks.map(function (b) {
-        return (b.block_id === 'decision_actions_' + qid) ? resolvedSection : b;
+        if (b.block_id === 'decision_actions_' + qid) return resolvedSection;
+        if (progressSection && b.block_id === 'decision_progress') return progressSection;
+        return b;
       });
     } else {
       // 拿不到原始 blocks 時退回整張替換（至少要讓按鈕消失）
@@ -182,30 +194,37 @@ const SlackProvider = {
 
     const fallbackText = '✅ [' + info.jiraId + '] ' + qid + ' 由 ' + info.user + ' 選擇：' + info.choice;
 
+    // 以 chat.update 為主：它對 blocks 的支援最完整，且回應可驗證。
+    // 先前優先走 response_url，但那次呼叫帶了 muteHttpExceptions，Slack 回錯誤時
+    // 不會 throw，程式卻當成功直接 return——卡片永遠不會更新，也不會退回 chat.update。
+    if (channel && messageId) {
+      const res = this.updateMessage(channel, messageId, fallbackText, blocks);
+      if (res && res.ok) return;
+      console.error('chat.update 失敗:', res && res.error, '→ 改試 response_url');
+    }
+
+    // fallback：response_url（30 分鐘內有效，不需要 token）
     if (info.responseUrl) {
       try {
-        UrlFetchApp.fetch(info.responseUrl, {
+        const r = UrlFetchApp.fetch(info.responseUrl, {
           method: 'post',
           contentType: 'application/json',
           payload: JSON.stringify({
-            response_type: 'in_channel',
             replace_original: true,
             text: fallbackText,
             blocks: blocks
           }),
           muteHttpExceptions: true
         });
-        return;
+        const code = r.getResponseCode();
+        if (code >= 200 && code < 300) return;
+        console.error('response_url 更新失敗 HTTP', code, r.getContentText());
       } catch (err) {
-        console.warn('response_url 更新失敗，改用 chat.update:', err);
+        console.error('response_url 更新異常:', err);
       }
     }
 
-    if (!channel || !messageId) {
-      console.error('resolveDecision: 缺少 channel/ts 且無 response_url，按鈕未能消除');
-      return;
-    }
-    this.updateMessage(channel, messageId, fallbackText, blocks);
+    console.error('resolveDecision: 兩種更新方式都失敗，按鈕未能消除（qid=' + qid + '）');
   },
 
   // 附件上傳：Slack 的 files.upload 已退役，須走 external upload 三步
@@ -363,7 +382,13 @@ const SlackProvider = {
         payload: JSON.stringify(updateBody),
         muteHttpExceptions: true
       });
-      return JSON.parse(res.getContentText());
+      const json = JSON.parse(res.getContentText());
+      if (!json.ok) {
+        // 常見原因：message_not_found（ts 不對）、cant_update_message（不是 bot 自己發的）、
+        // invalid_blocks（blocks 結構被改壞）
+        console.error('chat.update 回報失敗:', json.error, 'channel=' + channel, 'ts=' + ts);
+      }
+      return json;
     } catch (err) {
       console.error('Slack updateMessage 失敗:', err);
       return null;

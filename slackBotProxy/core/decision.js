@@ -298,14 +298,40 @@ function handleInteraction(payload, provider, key) {
     // ── 3 秒預算內的執行順序（順序是刻意的）──
     // 1. 先觸發 resume：這是唯一不可失敗的動作。若整體超過 3 秒被 Slack 判逾時，
     //    GAS 本身仍會跑完，但把最關鍵的一步放在前面可將風險降到最低。
-    dispatchResume(jiraId, pipeline, questionId, choice, user);
+    const dispatched = dispatchResume(jiraId, pipeline, questionId, choice, user);
+
+    if (!dispatched) {
+      // 觸發失敗時**不可**把卡片標成已定案——那會讓人以為流程在跑。
+      // 同時撤掉去重標記，讓他可以再點一次重試。
+      cache.remove(cacheKey);
+      provider.notifyTransient(interaction,
+        '⚠️ 已記錄你的選擇，但觸發 GitHub Actions 失敗，流程沒有接續。請稍後再點一次，' +
+        '或確認 GAS 的 GITHUB_TOKEN 是否有效。');
+      return _emptyResponse_();
+    }
+
+    // 算出這張卡片的整體進度：全部答完才會接續後續 Phase，人需要看得到還剩幾題
+    const ctx = _loadDecisionContext_(questionId, null);
+    let progressText = '';
+    if (ctx && ctx.question_ids && ctx.question_ids.length) {
+      const total = ctx.question_ids.length;
+      const remaining = ctx.question_ids.filter(function (qid) {
+        return !cache.get('answered_' + qid);
+      });
+      const answered = total - remaining.length;
+      progressText = (remaining.length === 0)
+        ? '*執行階段*：`' + (ctx.phase || '') + '`\n✅ 全部 *' + total +
+          '* 題已回答完畢，正在接續 `' + (ctx.pipeline || '') + '`…'
+        : '*執行階段*：`' + (ctx.phase || '') + '`\n共 *' + total + '* 題待決議（已回答 ' +
+          answered + '／' + total + '），**每題都回答完**才會接續後續流程。';
+    }
 
     // 只清掉這一題的上下文；同一張卡片的其他題還要能繼續回答
     _clearQuestionContext_(questionId);
 
-    // 2. 再更新卡片消除按鈕。優先走 response_url（免 token、少一次認證握手），
-    //    失敗才退回 chat.update。
-    //    若日後實測仍常逾時，升級路徑是把 dispatch 丟進 PropertiesService 佇列，
+    // 2. 再更新卡片：替換這一題的按鈕區塊、就地更新進度行。
+    //    以 chat.update 為主、response_url 為 fallback（見 slack.js 的說明）。
+    //    若日後實測常逾時，升級路徑是把 dispatch 丟進 PropertiesService 佇列，
     //    改由 ScriptApp.newTrigger(...).after(1000) 非同步送出——代價是需要
     //    script.scriptapp 授權，且多出「trigger 沒跑就永遠不 resume」的靜默失敗模式，
     //    因此目前不採用。
@@ -316,6 +342,7 @@ function handleInteraction(payload, provider, key) {
       timeStr: timeStr,
       jiraId: jiraId,
       blocks: interaction.blocks,          // 逐題替換用
+      progressText: progressText,          // 就地更新的進度行
       responseUrl: interaction.responseUrl
     });
 
