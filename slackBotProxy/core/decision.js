@@ -16,26 +16,36 @@ function handleDecisionRequest(body, key, provider) {
   const phase = body.phase || 'unknown';
   const pipeline = body.pipeline || 'sa-pipeline';
   const conv = body.conversation || {};
-  const questionObj = body.question || {};
+  // questions 為多題陣列；question 是舊版單題欄位，保留相容
+  const questions = (body.questions && body.questions.length)
+    ? body.questions
+    : [body.question || {}];
+  const attachments = body.attachments || [];
 
   if (!conv.channel && !conv.space) {
     return ContentService.createTextOutput(JSON.stringify({ error: 'Missing channel or space in conversation' }))
       .setMimeType(ContentService.MimeType.JSON);
   }
 
-  // 透過 Provider 貼出互動卡片
-  const messageId = provider.postDecision(conv, questionObj, jiraId, phase, pipeline);
+  // 透過 Provider 貼出互動卡片（一張訊息、逐題一組按鈕）
+  const messageId = provider.postDecision(conv, {
+    questions: questions,
+    jiraId: jiraId,
+    phase: phase,
+    pipeline: pipeline,
+    attachments: attachments
+  });
 
   // 存下決策上下文，供文字回覆（@Alice answer）反查。
   // 按鈕點擊不需要這個（jira_id / pipeline 就藏在 button value 裡），但文字回覆只有
   // 一句話，必須靠 thread 或 question_id 才能回推是哪張單、要接續哪個 pipeline。
   _saveDecisionContext_({
-    question_id: questionObj.id,
+    question_ids: questions.map(function (q) { return q.id; }),
+    // 以第一題的 resume_action 代表整組（同一 Phase 的題目型別一致）
+    resume_action: questions[0].resume_action || 'continue',
     jira_id: jiraId,
     phase: phase,
     pipeline: pipeline,
-    // 閘門型（complete）問題不接受文字回覆，見 handleTextAnswer 的說明
-    resume_action: questionObj.resume_action || 'continue',
     conversation: conv,
     message_id: messageId
   });
@@ -55,32 +65,56 @@ function handleDecisionRequest(body, key, provider) {
 //  CacheService 最長只有 6 小時。答覆後即刪除，避免無限累積。
 // ═══════════════════════════════════════════════════════════════════
 
-function _ctxKeys_(ctx) {
-  const keys = [];
-  if (ctx.question_id) keys.push(`dctx_q_${ctx.question_id}`);
-  const thread = ctx.conversation && (ctx.conversation.thread || ctx.conversation.channel);
-  if (thread) keys.push(`dctx_t_${thread}`);
-  return keys;
+function _ctxThreadKey_(conv) {
+  const thread = conv && (conv.thread || conv.channel);
+  return thread ? ('dctx_t_' + thread) : null;
 }
 
 function _saveDecisionContext_(ctx) {
   const props = PropertiesService.getScriptProperties();
-  const value = JSON.stringify(ctx);
-  _ctxKeys_(ctx).forEach(function (k) { props.setProperty(k, value); });
+  // 每題各存一份（供 @Alice answer Q-00X 直接命中）
+  (ctx.question_ids || []).forEach(function (qid) {
+    if (!qid) return;
+    const one = JSON.parse(JSON.stringify(ctx));
+    one.question_id = qid;
+    props.setProperty('dctx_q_' + qid, JSON.stringify(one));
+  });
+  // thread 再存一份（供在 thread 內省略編號時反查）
+  const tk = _ctxThreadKey_(ctx.conversation);
+  if (tk) props.setProperty(tk, JSON.stringify(ctx));
 }
 
 function _loadDecisionContext_(questionId, thread) {
   const props = PropertiesService.getScriptProperties();
-  let raw = null;
-  if (questionId) raw = props.getProperty(`dctx_q_${questionId}`);
-  if (!raw && thread) raw = props.getProperty(`dctx_t_${thread}`);
+
+  if (questionId) {
+    const raw = props.getProperty('dctx_q_' + questionId);
+    if (!raw) return null;
+    try { return JSON.parse(raw); } catch (err) { return null; }
+  }
+
+  if (!thread) return null;
+  const raw = props.getProperty('dctx_t_' + thread);
   if (!raw) return null;
-  try { return JSON.parse(raw); } catch (err) { return null; }
+
+  let ctx;
+  try { ctx = JSON.parse(raw); } catch (err) { return null; }
+
+  // 未指定編號時，挑「還沒被回答」的第一題。多題情境下這是最符合直覺的解讀。
+  const cache = CacheService.getScriptCache();
+  const ids = ctx.question_ids || (ctx.question_id ? [ctx.question_id] : []);
+  const pending = ids.filter(function (qid) { return !cache.get('answered_' + qid); });
+  if (pending.length === 0) return null;
+
+  ctx.question_id = pending[0];
+  ctx.remaining = pending.length;
+  return ctx;
 }
 
-function _clearDecisionContext_(ctx) {
-  const props = PropertiesService.getScriptProperties();
-  _ctxKeys_(ctx).forEach(function (k) { props.deleteProperty(k); });
+// 只清掉「這一題」——同一張卡片的其他題還要能繼續回答
+function _clearQuestionContext_(questionId) {
+  if (!questionId) return;
+  PropertiesService.getScriptProperties().deleteProperty('dctx_q_' + questionId);
 }
 
 
@@ -158,16 +192,19 @@ function handleTextAnswer(args, conv, user, provider) {
     // 1. 先觸發 resume（唯一不可失敗的動作）
     const ok = dispatchResume(ctx.jira_id, ctx.pipeline, ctx.question_id, answerText, '<@' + user + '>');
 
-    // 2. 更新原卡片消除按鈕，避免有人又去點
-    const timeStr = Utilities.formatDate(new Date(), 'Asia/Taipei', 'HH:mm:ss');
-    provider.resolveDecision(ctx.conversation, ctx.message_id,
-      '（文字回覆）' + answerText, '<@' + user + '>', timeStr, ctx.jira_id);
+    // 2. 刻意**不動原卡片**：文字回覆走 app_mention 事件，拿不到 payload.message.blocks，
+    //    只能整張替換——那會把同一張卡片上其他題的按鈕一起吃掉。
+    //    該題若被重複點擊，會被 answered_<qid> 快取擋下並收到 ephemeral 提示，
+    //    所以按鈕留著不會造成重複處理。
 
     if (ok) {
-      _clearDecisionContext_(ctx);
+      _clearQuestionContext_(ctx.question_id);
+      const remaining = (ctx.remaining || 1) - 1;
+      const tail = remaining > 0
+        ? '（本張卡片還有 ' + remaining + ' 題待回覆，全部答完才會接續）'
+        : '正在接續 ' + ctx.pipeline + '（' + ctx.jira_id + '）…';
       provider.postMessage(conv.channel,
-        '\u2705 已收下 <@' + user + '> 對 ' + ctx.question_id + ' 的回覆，正在接續 ' +
-        ctx.pipeline + '（' + ctx.jira_id + '）…', conv.thread);
+        '\u2705 已收下 <@' + user + '> 對 ' + ctx.question_id + ' 的回覆。' + tail, conv.thread);
     } else {
       cache.remove(cacheKey);   // dispatch 失敗要讓人能重試
       provider.postMessage(conv.channel,
@@ -233,8 +270,8 @@ function handleInteraction(payload, provider, key) {
     //    GAS 本身仍會跑完，但把最關鍵的一步放在前面可將風險降到最低。
     dispatchResume(jiraId, pipeline, questionId, choice, user);
 
-    // 清掉文字回覆用的上下文（該題已定案）
-    _clearDecisionContext_({ question_id: questionId, conversation: conv });
+    // 只清掉這一題的上下文；同一張卡片的其他題還要能繼續回答
+    _clearQuestionContext_(questionId);
 
     // 2. 再更新卡片消除按鈕。優先走 response_url（免 token、少一次認證握手），
     //    失敗才退回 chat.update。
@@ -242,7 +279,15 @@ function handleInteraction(payload, provider, key) {
     //    改由 ScriptApp.newTrigger(...).after(1000) 非同步送出——代價是需要
     //    script.scriptapp 授權，且多出「trigger 沒跑就永遠不 resume」的靜默失敗模式，
     //    因此目前不採用。
-    provider.resolveDecision(conv, messageId, choice, user, timeStr, jiraId, interaction.responseUrl);
+    provider.resolveDecision(conv, messageId, {
+      questionId: questionId,
+      choice: choice,
+      user: user,
+      timeStr: timeStr,
+      jiraId: jiraId,
+      blocks: interaction.blocks,          // 逐題替換用
+      responseUrl: interaction.responseUrl
+    });
 
   } finally {
     lock.releaseLock();

@@ -19,105 +19,128 @@ const SlackProvider = {
     };
   },
 
-  // 2. 貼出決策互動卡片 (Block Kit 按鈕)
-  postDecision: function(conv, questionObj, jiraId, phase, pipeline) {
+  // 2. 貼出決策互動卡片：一張訊息、逐題一組按鈕
+  //    ctx = { questions: [...], jiraId, phase, pipeline, attachments: [...] }
+  postDecision: function (conv, ctx) {
     const channel = conv.channel;
     const threadTs = conv.thread || null;
-
-    const questionId = questionObj.id || ('Q-' + new Date().getTime());
-    const questionText = questionObj.question || '有待確認事項需您抉擇';
-    const options = questionObj.options || ['A: 同意', 'B: 不同意'];
-    const contextText = questionObj.context || '';
+    const questions = (ctx.questions && ctx.questions.length) ? ctx.questions : [ctx.question || {}];
 
     const blocks = [
       {
         type: 'header',
-        text: {
-          type: 'plain_text',
-          text: `🔴 人機決策請求 (${jiraId})`,
-          emoji: true
-        }
+        text: { type: 'plain_text', text: '\u{1F534} 人機決策請求 (' + ctx.jiraId + ')', emoji: true }
       },
       {
         type: 'section',
         text: {
           type: 'mrkdwn',
-          text: `*執行階段*：\`${phase}\`\n*問題描述*：\n> ${questionText.replace(/\n/g, '\n> ')}`
+          text: '*執行階段*：`' + ctx.phase + '`\n共 *' + questions.length + '* 題待決議，' +
+                '**每題都回答完**才會接續後續流程。'
         }
-      }
+      },
+      { type: 'divider' }
     ];
 
-    if (contextText) {
+    questions.forEach(function (q, qi) {
+      const qid = q.id || ('Q-' + (qi + 1));
+      const qText = q.question || '（缺少問題描述）';
+      const options = (q.options && q.options.length) ? q.options : ['A: 同意', 'B: 不同意'];
+
       blocks.push({
-        type: 'context',
-        elements: [
-          {
-            type: 'mrkdwn',
-            text: `ℹ️ *背景*：${contextText}`
-          }
-        ]
-      });
-    }
-
-    const buttonElements = options.map((opt, index) => {
-      const valuePayload = JSON.stringify({
-        question_id: questionId,
-        choice: opt,
-        jira_id: jiraId,
-        pipeline: pipeline
+        type: 'section',
+        text: { type: 'mrkdwn', text: '*' + qid + '*　' + qText }
       });
 
-      return {
-        type: 'button',
-        text: {
-          type: 'plain_text',
-          text: opt.length > 70 ? (opt.substring(0, 67) + '...') : opt,
-          emoji: true
-        },
-        action_id: `decision_choice_${index}`,
-        value: valuePayload
-      };
+      if (q.context) {
+        blocks.push({
+          type: 'context',
+          elements: [{ type: 'mrkdwn', text: 'ℹ️ ' + q.context }]
+        });
+      }
+
+      blocks.push({
+        type: 'actions',
+        // block_id 是逐題更新的依據：答完一題只換掉這個 block，其他題的按鈕要留著
+        block_id: 'decision_actions_' + qid,
+        elements: options.map(function (opt, oi) {
+          return {
+            type: 'button',
+            text: {
+              type: 'plain_text',
+              text: opt.length > 70 ? (opt.substring(0, 67) + '...') : opt,
+              emoji: true
+            },
+            action_id: 'decision_' + qid + '_' + oi,
+            value: JSON.stringify({
+              question_id: qid,
+              choice: opt,
+              jira_id: ctx.jiraId,
+              pipeline: ctx.pipeline
+            })
+          };
+        })
+      });
+
+      if (qi < questions.length - 1) blocks.push({ type: 'divider' });
     });
 
     blocks.push({
-      type: 'actions',
-      block_id: `decision_actions_${questionId}`,
-      elements: buttonElements
+      type: 'context',
+      elements: [{
+        type: 'mrkdwn',
+        text: '\u{1F4AC} 選項無法表達時，直接在本 thread 回覆 `@Alice answer ' +
+              (questions[0].id || 'Q-001') + ' <你的答覆>`'
+      }]
     });
 
-    const res = this.postMessage(channel, `🔴 [${jiraId}] 人機決策請求: ${questionText}`, threadTs, blocks);
-    return res ? res.ts : null;
+    const summary = '\u{1F534} [' + ctx.jiraId + '] ' + questions.length + ' 題人機決策請求';
+    const res = this.postMessage(channel, summary, threadTs, blocks);
+    const messageId = res ? res.ts : null;
+
+    // 附件（補問清單 / 阻塞總覽）掛在同一個 thread，供人閱讀
+    if (ctx.attachments && ctx.attachments.length) {
+      this.uploadFiles({ channel: channel, thread: threadTs || messageId }, ctx.attachments);
+    }
+
+    return messageId;
   },
 
-  // 3. 解決/定案決策（替換卡片為純文字，消除按鈕）
-  //    有 responseUrl 時優先用它：不需要讀 SLACK_TOKEN、少一次認證握手，
-  //    在 Slack 的 3 秒預算內更保險。
-  resolveDecision: function(conv, messageId, choice, user, timeStr, jiraId, responseUrl) {
+  // 3. 定案某一題：只替換該題的按鈕區塊，其餘題目維持可點
+  resolveDecision: function (conv, messageId, info) {
     const channel = conv.channel;
-    const ts = messageId;
-
-    const updatedBlocks = [
-      {
-        type: 'section',
-        text: {
-          type: 'mrkdwn',
-          text: `✅ *[${jiraId}] 人機決策已定案*\n• **已由**：${user}\n• **選擇**：\`${choice}\`\n• **時間**：${timeStr}`
-        }
+    const qid = info.questionId;
+    const resolvedSection = {
+      type: 'section',
+      text: {
+        type: 'mrkdwn',
+        text: '✅ *' + qid + ' 已定案*　選擇：`' + info.choice + '`　' +
+              '（由 ' + info.user + '，' + info.timeStr + '）'
       }
-    ];
+    };
 
-    const fallbackText = `✅ [${jiraId}] 決策已由 ${user} 選擇: ${choice}`;
+    let blocks = info.blocks;
+    if (blocks && blocks.length) {
+      blocks = blocks.map(function (b) {
+        return (b.block_id === 'decision_actions_' + qid) ? resolvedSection : b;
+      });
+    } else {
+      // 拿不到原始 blocks 時退回整張替換（至少要讓按鈕消失）
+      blocks = [resolvedSection];
+    }
 
-    if (responseUrl) {
+    const fallbackText = '✅ [' + info.jiraId + '] ' + qid + ' 由 ' + info.user + ' 選擇：' + info.choice;
+
+    if (info.responseUrl) {
       try {
-        UrlFetchApp.fetch(responseUrl, {
+        UrlFetchApp.fetch(info.responseUrl, {
           method: 'post',
           contentType: 'application/json',
           payload: JSON.stringify({
             response_type: 'in_channel',
             replace_original: true,
             text: fallbackText,
-            blocks: updatedBlocks
+            blocks: blocks
           }),
           muteHttpExceptions: true
         });
@@ -127,11 +150,57 @@ const SlackProvider = {
       }
     }
 
-    if (!channel || !ts) {
-      console.error('resolveDecision: 缺少 channel/ts 且無 response_url，卡片按鈕未能消除');
+    if (!channel || !messageId) {
+      console.error('resolveDecision: 缺少 channel/ts 且無 response_url，按鈕未能消除');
       return;
     }
-    this.updateMessage(channel, ts, fallbackText, updatedBlocks);
+    this.updateMessage(channel, messageId, fallbackText, blocks);
+  },
+
+  // 附件上傳：Slack 的 files.upload 已退役，須走 external upload 三步
+  // 需要 Bot Token Scope: files:write
+  uploadFiles: function (conv, attachments) {
+    const token = PropertiesService.getScriptProperties().getProperty('SLACK_TOKEN');
+    if (!token) { console.warn('未設定 SLACK_TOKEN，略過附件上傳'); return; }
+    const auth = { Authorization: 'Bearer ' + token };
+
+    attachments.forEach(function (a) {
+      try {
+        const bytes = Utilities.newBlob(a.content).getBytes().length;
+
+        // ① 取得一次性上傳網址
+        const r1 = UrlFetchApp.fetch(
+          'https://slack.com/api/files.getUploadURLExternal?filename=' +
+          encodeURIComponent(a.name) + '&length=' + bytes,
+          { headers: auth, muteHttpExceptions: true });
+        const j1 = JSON.parse(r1.getContentText());
+        if (!j1.ok) { console.error('getUploadURLExternal 失敗:', j1.error, a.name); return; }
+
+        // ② 上傳內容
+        UrlFetchApp.fetch(j1.upload_url, {
+          method: 'post',
+          payload: a.content,
+          muteHttpExceptions: true
+        });
+
+        // ③ 完成並貼到對話（thread 內）
+        const r3 = UrlFetchApp.fetch('https://slack.com/api/files.completeUploadExternal', {
+          method: 'post',
+          contentType: 'application/json',
+          headers: auth,
+          payload: JSON.stringify({
+            files: [{ id: j1.file_id, title: a.name }],
+            channel_id: conv.channel,
+            thread_ts: conv.thread || undefined
+          }),
+          muteHttpExceptions: true
+        });
+        const j3 = JSON.parse(r3.getContentText());
+        if (!j3.ok) console.error('completeUploadExternal 失敗:', j3.error, a.name);
+      } catch (err) {
+        console.error('附件上傳異常:', a.name, err);
+      }
+    });
   },
 
   // 4. 解析 Slack 按鈕互動 payload
@@ -170,6 +239,8 @@ const SlackProvider = {
         thread: threadTs
       },
       messageId: messageTs,
+      // 逐題替換需要原始 blocks（只換掉被回答那一題的按鈕區塊）
+      blocks: (payload.message && payload.message.blocks) || null,
       // response_url 有效 30 分鐘，用來發只有點擊者看得到的 ephemeral 提示
       responseUrl: payload.response_url || null
     };
