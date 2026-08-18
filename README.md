@@ -130,38 +130,63 @@ ls -la slackBotProxy      # 要看到 .clasp.json 與 src/
 
 ## 日常工作流程
 
-以 `slackBotProxy` 為例，完整走一次日常開發循環。
+> 詳細圖文說明請參考 [clasp 日常開發指南](docs/clasp-dev-guide.html)。
 
-### 1. 開工前：先拉最新
+### 先搞懂：程式碼在三個地方
 
-先拉 GitHub 上其他人的改動，再拉 GAS 線上編輯器的改動：
+| 地方 | 角色 | 工具 |
+|---|---|---|
+| **GitHub** | 歷史備份、團隊協作 | `git pull` / `git push` |
+| **本地電腦** | 你實際寫程式的地方（中間點） | — |
+| **線上 GAS** | 程式實際執行的地方 | `clasp pull` / `clasp push` |
+
+clasp 和 GitHub **沒有直接關係**。只有你的本地電腦同時連著兩邊，所有東西都經過本地中轉。
+
+> **pull = 拉下來、push = 推上去**，方向都是相對「本地」而言。
+> **clasp 的 pull / push 是「覆蓋」，不是「合併」。** 誰後到誰贏、沒有智慧合併，所以更要守紀律。
+
+### 完整開發循環（以 slackBotProxy 為例）
+
+```mermaid
+sequenceDiagram
+    participant Git as GitHub
+    participant Dev as 本地電腦
+    participant GAS as 線上 GAS
+
+    Git->>Dev: ① git pull（拉隊友的碼）
+    GAS->>Dev: ② clasp pull（拉 GAS 最新）
+    Note over Dev: ③ 本地修改程式碼
+    Dev->>GAS: ④ clasp push（推上 GAS 測試）
+    Note over GAS: 測試驗證
+    GAS-->>Dev: 沒過 → 回 ③ 修改
+    Dev->>Git: ⑤ git add + commit + push
+```
+
+#### ① ② 開工前：兩個 pull
 
 ```bash
 git pull
 clasp pull --project slackBotProxy
 ```
 
-> ⚠️ `clasp pull` 會覆蓋本地檔案。如果本地有未 commit 的改動，先 `git stash` 或 commit 再 pull。
+- `git pull`：問 GitHub「有沒有隊友推的新東西？」
+- `clasp pull`：問線上 GAS「有沒有人直接在編輯器改過？」
 
-### 2. 本地修改程式碼
+> ⚠️ `clasp pull` 會覆蓋本地檔案。本地有未 commit 的改動時，先 `git stash` 或 `git commit` 再 pull。
 
-用編輯器改 `slackBotProxy/` 底下的檔案。
+#### ③ 本地修改
 
-### 3. 確認哪些檔案會被推上去
+用編輯器改 `slackBotProxy/` 底下的檔案。養成習慣一律在本地改，本地是「真相來源」。
 
-```bash
-clasp status --project slackBotProxy
-```
-
-### 4. 推上 GAS
+#### ④ 推上 GAS
 
 ```bash
 clasp push --project slackBotProxy
 ```
 
-推完可以用 `clasp open --project slackBotProxy` 開啟線上編輯器確認。
+推完用 `clasp open --project slackBotProxy` 開線上編輯器確認。密集開發時可用 `clasp push --watch` 存檔自動推。
 
-### 5. 提交到 Git
+#### ⑤ 存進 GitHub
 
 ```bash
 git add slackBotProxy/
@@ -169,30 +194,19 @@ git commit -m "feat(slackBotProxy): 加入 XXX 功能"
 git push
 ```
 
-### 完整流程圖
+> `clasp push` → 推到 GAS，讓程式能跑。`git push` → 推到 GitHub，留歷史紀錄。兩件事都要做。
 
-```mermaid
-sequenceDiagram
-    participant Dev as 本地開發
-    participant GAS as Google Apps Script
-    participant Git as GitHub
+### Web App 部署（有 doPost 才需要）
 
-    Git->>Dev: git pull（拉 GitHub 最新）
-    Dev->>GAS: clasp pull（拉 GAS 最新）
-    Note over Dev: 修改程式碼
-    Dev->>Dev: clasp status（確認檔案）
-    Dev->>GAS: clasp push（推上 GAS）
-    Note over GAS: 線上測試驗證
-    GAS-->>Dev: 測試沒過 → 回頭修改
-    Dev->>Git: git add + commit + push
-```
+`clasp push` 只更新程式碼，**不會更新對外的 `/exec` 網址**。改了 `doPost` 邏輯後，還要「更新部署」外部呼叫才會跑到新碼：
 
-### 注意事項
+**推薦做法：** GAS 編輯器 → 右上「部署」→「管理部署作業」→ 編輯 → 版本選「新版本」→ 部署。網址不變、內容更新。
 
-- **先 pull 再改**：避免本地跟線上不同步，push 時覆蓋別人的改動。
-- **先 push 再 commit**：確認 GAS 端沒問題再進版控。
-- **clasp 指令加 `--project`**：在 repo 根目錄用 `--project <資料夾>` 指定專案，不用 cd 來 cd 去。
-- **線上編輯器改完也要同步**：如果臨時在線上改了，記得回來 `clasp pull --project <資料夾>` + git commit，保持版控一致。
+| 改了什麼 | 要做什麼 |
+|---|---|
+| doPost / doGet 邏輯 | clasp push **＋ 更新部署** |
+| 只改手動跑的 function | clasp push 就夠 |
+| 只改註解、重構 | clasp push 即可 |
 
 ---
 

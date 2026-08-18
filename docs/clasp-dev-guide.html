@@ -1,0 +1,341 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>B Team｜clasp 日常開發指南</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Noto+Serif+TC:wght@500;700;900&family=Noto+Sans+TC:wght@400;500;700&family=JetBrains+Mono:wght@400;500;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --cream: #f5f0e6; --cream-deep: #ece4d3; --red: #84212f; --red-soft: #a13543;
+    --gold: #c9a04e; --gold-soft: #e0c98a; --ink: #2b2320; --ink-soft: #5c5049;
+    --code-bg: #2b2320; --code-ink: #f0e9db; --line: #d9cdb6; --ok: #3f7d52; --warn: #b5762a;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { scroll-behavior: smooth; }
+  body { font-family: 'Noto Sans TC', sans-serif; background: var(--cream); color: var(--ink); line-height: 1.8; font-size: 16px; }
+  .wrap { display: grid; grid-template-columns: 250px 1fr; max-width: 1180px; margin: 0 auto; }
+  aside { position: sticky; top: 0; align-self: start; height: 100vh; overflow-y: auto; padding: 42px 26px 42px 32px; border-right: 1px solid var(--line); }
+  .brand { font-family: 'Noto Serif TC', serif; font-weight: 900; color: var(--red); font-size: 1.35rem; letter-spacing: 0.04em; line-height: 1.3; }
+  .brand small { display: block; font-family: 'JetBrains Mono', monospace; font-weight: 400; font-size: 0.68rem; color: var(--gold); letter-spacing: 0.18em; margin-top: 6px; }
+  nav { margin-top: 34px; border-top: 1px solid var(--line); padding-top: 22px; }
+  nav a { display: block; text-decoration: none; color: var(--ink-soft); font-size: 0.86rem; padding: 7px 0 7px 14px; border-left: 2px solid transparent; transition: all 0.2s; line-height: 1.5; }
+  nav a .n { font-family: 'JetBrains Mono', monospace; color: var(--gold); font-size: 0.72rem; margin-right: 8px; }
+  nav a:hover { color: var(--red); }
+  nav a.active { color: var(--red); border-left-color: var(--red); font-weight: 700; }
+  main { padding: 58px 56px 120px; min-width: 0; }
+  .hero { border-bottom: 2px solid var(--red); padding-bottom: 30px; }
+  .eyebrow { font-family: 'JetBrains Mono', monospace; font-size: 0.72rem; letter-spacing: 0.24em; color: var(--gold); text-transform: uppercase; margin-bottom: 14px; }
+  h1 { font-family: 'Noto Serif TC', serif; font-weight: 900; color: var(--red); font-size: 2.5rem; line-height: 1.25; }
+  .hero p { margin-top: 16px; color: var(--ink-soft); font-size: 1rem; max-width: 62ch; }
+  section { padding-top: 54px; scroll-margin-top: 20px; }
+  h2 { font-family: 'Noto Serif TC', serif; font-weight: 700; color: var(--red); font-size: 1.55rem; display: flex; align-items: baseline; gap: 14px; margin-bottom: 6px; }
+  h2 .step { font-family: 'JetBrains Mono', monospace; font-size: 0.9rem; color: #fff; background: var(--red); border-radius: 4px; padding: 2px 10px; font-weight: 700; flex-shrink: 0; }
+  h2 + .lead { color: var(--ink-soft); margin-bottom: 22px; font-size: 0.95rem; }
+  h3 { font-family: 'Noto Serif TC', serif; font-weight: 700; color: var(--ink); font-size: 1.12rem; margin: 28px 0 12px; padding-left: 12px; border-left: 3px solid var(--gold); }
+  p { margin-bottom: 14px; }
+  strong { color: var(--red); font-weight: 700; }
+  pre { background: var(--code-bg); color: var(--code-ink); border-radius: 8px; padding: 18px 20px; overflow-x: auto; margin: 14px 0; font-family: 'JetBrains Mono', monospace; font-size: 0.83rem; line-height: 1.7; border-left: 3px solid var(--gold); }
+  pre .c { color: #8a9a8f; } pre .k { color: var(--gold-soft); } pre .s { color: #d9a0a8; }
+  code { font-family: 'JetBrains Mono', monospace; background: var(--cream-deep); color: var(--red); padding: 1px 7px; border-radius: 4px; font-size: 0.86em; }
+  .box { border-radius: 8px; padding: 16px 20px 16px 46px; margin: 18px 0; position: relative; font-size: 0.92rem; }
+  .box::before { position: absolute; left: 16px; top: 15px; font-size: 1.1rem; }
+  .box.tip { background: #f0ede0; border: 1px solid var(--line); } .box.tip::before { content: '💡'; }
+  .box.warn { background: #f7efe2; border: 1px solid var(--gold); } .box.warn::before { content: '⚠️'; } .box.warn strong { color: var(--warn); }
+  .box.danger { background: #f6e7e6; border: 1px solid var(--red-soft); } .box.danger::before { content: '🚫'; }
+  .box b { color: var(--ink); }
+  .flow { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; margin: 20px 0; }
+  .flow .node { background: var(--cream-deep); border: 1px solid var(--line); border-radius: 8px; padding: 10px 16px; font-family: 'JetBrains Mono', monospace; font-size: 0.82rem; color: var(--ink); }
+  .flow .node.hl { background: var(--red); color: #fff; border-color: var(--red); }
+  .flow .arr { color: var(--gold); font-weight: 700; font-size: 1.1rem; }
+  table.cmd { width: 100%; border-collapse: collapse; margin: 18px 0; font-size: 0.88rem; }
+  table.cmd th, table.cmd td { text-align: left; padding: 10px 14px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  table.cmd th { font-family: 'Noto Serif TC', serif; color: var(--red); font-weight: 700; background: var(--cream-deep); }
+  table.cmd td:first-child { font-family: 'JetBrains Mono', monospace; font-size: 0.8rem; color: var(--red); white-space: nowrap; }
+  .tree { background: #efe9db; border: 1px solid var(--line); border-radius: 8px; padding: 16px 20px; font-family: 'JetBrains Mono', monospace; font-size: 0.82rem; line-height: 1.75; color: var(--ink); margin: 14px 0; white-space: pre; overflow-x: auto; }
+  .tree .dir { color: var(--red); font-weight: 700; } .tree .cm { color: var(--ink-soft); }
+  footer { margin-top: 80px; padding-top: 24px; border-top: 1px solid var(--line); color: var(--ink-soft); font-size: 0.8rem; font-family: 'JetBrains Mono', monospace; letter-spacing: 0.04em; }
+  @media (max-width: 860px) { .wrap { grid-template-columns: 1fr; } aside { position: static; height: auto; border-right: none; border-bottom: 1px solid var(--line); } nav { display: none; } main { padding: 40px 24px 80px; } h1 { font-size: 1.9rem; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <aside>
+    <div class="brand">B&nbsp;Team 工程指南<small>CLASP 日常開發</small></div>
+    <nav id="nav">
+      <a href="#mental"><span class="n">00</span>程式碼在三個地方</a>
+      <a href="#cycle"><span class="n">01</span>完整開發循環</a>
+      <a href="#start"><span class="n">02</span>開工前：兩個 pull</a>
+      <a href="#edit"><span class="n">03</span>本地修改</a>
+      <a href="#push"><span class="n">04</span>推上 GAS：clasp push</a>
+      <a href="#git"><span class="n">05</span>存進 GitHub：git push</a>
+      <a href="#watch"><span class="n">06</span>即時同步：watch</a>
+      <a href="#deploy"><span class="n">07</span>Web App 部署</a>
+      <a href="#mono"><span class="n">08</span>Monorepo 多專案</a>
+      <a href="#cmd"><span class="n">09</span>指令速查</a>
+      <a href="#trouble"><span class="n">10</span>狀況排除</a>
+    </nav>
+  </aside>
+
+  <main>
+    <div class="hero">
+      <div class="eyebrow">Daily Workflow · Apps Script</div>
+      <h1>clasp 日常開發指南</h1>
+      <p>假設環境已裝好、專案也接進 repo 了。這份講的是「每天實際開發時怎麼操作」——什麼時候 pull、什麼時候 push、順序為何、多專案怎麼處理。跟著循環走就不會亂。</p>
+    </div>
+
+    <!-- 00 -->
+    <section id="mental">
+      <h2><span class="step">00</span>先搞懂：程式碼在三個地方</h2>
+      <p class="lead">這是最重要的一段。看懂這張圖，後面所有指令就都懂了。</p>
+      <p>你的 GAS 程式碼，同時存在<strong>三個地方</strong>：</p>
+      <div class="flow">
+        <div class="node">GitHub<br><span style="font-size:0.72rem;color:var(--ink-soft)">雲端備份・團隊協作</span></div>
+        <div class="arr">⇄</div>
+        <div class="node hl">本地電腦<br><span style="font-size:0.72rem;color:#f0e9db">你的 VS Code（中間點）</span></div>
+        <div class="arr">⇄</div>
+        <div class="node">線上 GAS<br><span style="font-size:0.72rem;color:var(--ink-soft)">程式實際執行的地方</span></div>
+      </div>
+      <p>三個地方各自的角色：</p>
+      <table class="cmd">
+        <thead><tr><th>地方</th><th>是什麼</th></tr></thead>
+        <tbody>
+          <tr><td>GitHub</td><td>程式碼的<b>歷史備份</b>與<b>團隊協作</b>中心。隊友的改動放這裡。</td></tr>
+          <tr><td>本地電腦</td><td>你<b>實際寫程式</b>的地方，也是唯一同時連著另外兩邊的<b>中間點</b>。</td></tr>
+          <tr><td>線上 GAS</td><td>程式碼<b>真正執行</b>的地方。Slack 呼叫的、觸發器跑的，都是這裡的版本。</td></tr>
+        </tbody>
+      </table>
+
+      <h3>兩條線、兩組指令（別搞混）</h3>
+      <p>本地電腦分別用<strong>不同工具</strong>連接另外兩邊：</p>
+      <table class="cmd">
+        <thead><tr><th>連接</th><th>用什麼</th><th>指令</th></tr></thead>
+        <tbody>
+          <tr><td>本地 ⇄ GitHub</td><td><b>git</b></td><td>git pull / git push</td></tr>
+          <tr><td>本地 ⇄ 線上 GAS</td><td><b>clasp</b></td><td>clasp pull / clasp push</td></tr>
+        </tbody>
+      </table>
+      <div class="box tip"><b>關鍵：clasp 和 GitHub 沒有直接關係。</b> GAS 不知道 GitHub 存在，GitHub 也不知道 GAS 存在。<b>只有你的本地電腦同時連著兩邊</b>，所有東西都經過本地中轉。</div>
+
+      <h3>pull / push 是什麼意思？</h3>
+      <p>不管 git 還是 clasp，<strong>pull = 拉下來、push = 推上去</strong>，方向都是相對「本地」而言：</p>
+      <table class="cmd">
+        <thead><tr><th>指令</th><th>方向</th><th>白話</th></tr></thead>
+        <tbody>
+          <tr><td>git pull</td><td>GitHub → 本地</td><td>把隊友推上 GitHub 的碼<b>拉下來</b></td></tr>
+          <tr><td>git push</td><td>本地 → GitHub</td><td>把你的改動<b>推上</b> GitHub 備份</td></tr>
+          <tr><td>clasp pull</td><td>線上 GAS → 本地</td><td>把 GAS 上的版本<b>拉下來</b></td></tr>
+          <tr><td>clasp push</td><td>本地 → 線上 GAS</td><td>把本地的碼<b>推上</b> GAS 去跑</td></tr>
+        </tbody>
+      </table>
+      <div class="box danger"><strong>clasp 的 pull / push 是「覆蓋」，不是「合併」。</strong> clasp pull 蓋掉本地、clasp push 蓋掉線上，誰後到誰贏、沒有智慧合併。（git 則有版本合併機制，比較聰明。）所以 clasp 這端更要守紀律：開工先 pull、改完先 push。</div>
+    </section>
+
+    <!-- 01 -->
+    <section id="cycle">
+      <h2><span class="step">01</span>完整開發循環</h2>
+      <p class="lead">一個完整回合，把兩條線都照顧到，就是這個順序。</p>
+      <div class="flow">
+        <div class="node">① git pull<br>拉隊友的碼</div>
+        <div class="arr">→</div>
+        <div class="node">② clasp pull<br>拉 GAS 最新</div>
+        <div class="arr">→</div>
+        <div class="node">③ 改程式</div>
+        <div class="arr">→</div>
+        <div class="node">④ clasp push<br>推上 GAS 測</div>
+        <div class="arr">→</div>
+        <div class="node">⑤ git push<br>存進 GitHub</div>
+      </div>
+      <h3>兩個 pull 各問不同的地方</h3>
+      <p><strong>① git pull</strong>：問 GitHub「有沒有隊友推的新東西？」<br>
+         <strong>② clasp pull</strong>：問線上 GAS「有沒有人直接在編輯器改過？」<br>
+         兩個問的對象不同，所以都要做（尤其多人協作時）。</p>
+
+      <div class="box warn"><strong>現階段你一個人開發時：</strong> git pull 和 clasp pull 通常會顯示「已是最新、沒東西可拉」——因為都是你自己推的，沒別人動過。<b>做了不會錯，養成習慣就好。</b>等 Pedro、Samura 他們一起改之後，這兩個 pull 就變成必要的開場動作，不然會蓋掉彼此的改動。</div>
+    </section>
+
+    <!-- 02 -->
+    <section id="start">
+      <h2><span class="step">02</span>開工前：兩個 pull</h2>
+      <p class="lead">坐下來要動某個 GAS 前，先把兩邊的最新版都拉到本地。</p>
+      <pre><span class="c"># 在 repo 根目錄，先拉 GitHub</span>
+<span class="k">git</span> pull
+
+<span class="c"># 進要開發的專案，再拉線上 GAS</span>
+<span class="k">cd</span> slackBotProxy
+<span class="k">clasp</span> pull</pre>
+      <h3>為什麼要先 pull？</h3>
+      <p>因為別人（或你自己在別台電腦、或直接在 GAS 線上編輯器）可能改過。若不先 pull 就開始改、改完 push，會<strong>把對方的改動整個蓋掉</strong>。先 pull = 確保你站在最新的基礎上。</p>
+      <div class="box warn"><strong>clasp pull 會覆蓋本地未存檔的改動。</strong> 如果你本地有還沒 commit 的東西，先 <code>git commit</code> 或 <code>git stash</code> 存起來，再 pull，才不會被蓋掉。</div>
+    </section>
+
+    <!-- 03 -->
+    <section id="edit">
+      <h2><span class="step">03</span>本地修改</h2>
+      <p class="lead">在你慣用的編輯器（VS Code）裡改，不要在 GAS 線上編輯器改。</p>
+      <p>程式碼在子專案的 <code>src/</code> 底下：</p>
+      <div class="tree"><span class="dir">slackBotProxy/</span>
+├── .clasp.json
+└── <span class="dir">src/</span>
+    ├── appsscript.json      <span class="cm"># GAS 專案設定，一般不用動</span>
+    └── slackBotProxy.js     <span class="cm"># ← 在這裡寫你的邏輯</span></div>
+      <div class="box tip"><b>養成習慣：一律在本地改。</b> 本地是「真相來源」，改完 push 上去。若偶爾在線上編輯器改了，下次開工記得先 pull 拉回來，否則本地一 push 就把線上那次改動蓋掉了。</div>
+    </section>
+
+    <!-- 04 -->
+    <section id="push">
+      <h2><span class="step">04</span>推上 GAS：push</h2>
+      <p class="lead">本地改好，要讓 GAS 實際跑你的新碼，就 push。</p>
+      <pre><span class="k">clasp</span> push              <span class="c"># 把本地 src/ 推上線上 GAS</span></pre>
+      <p>push 完，打開 GAS 線上編輯器（或直接觸發你的 Web App / 觸發器），跑的就是你剛推上去的版本。</p>
+      <h3>push 沒反應 / 要強制</h3>
+      <p>若 clasp 因為線上有較新版本而擋下 push，確認你不會蓋掉重要東西後，可加 <code>-f</code> 強制：</p>
+      <pre><span class="k">clasp</span> push -f           <span class="c"># 強制覆蓋線上（確認過再用）</span></pre>
+      <div class="box danger"><strong>-f 會無條件蓋掉線上。</strong> 只有在你確定線上那版不需要保留時才用。不確定就先 <code>clasp pull</code> 看看線上是什麼，再決定。</div>
+      <div class="box tip"><b>如果這個專案有 <code>doPost</code> / <code>doGet</code>（Web App，例如 slackBotProxy）：</b> 光 push 還不夠，要讓對外網址跑到新碼還需「更新部署」。這部分獨立在 <a href="#deploy" style="color:var(--red);font-weight:700;">Step 07 Web App 部署</a> 說明。</div>
+    </section>
+
+    <!-- 05 -->
+    <section id="git">
+      <h2><span class="step">05</span>存進 GitHub：git push</h2>
+      <p class="lead">clasp push 到 GAS ≠ 進了 GitHub。這是<b>另一條線</b>，要另外做。</p>
+      <p>回想 Step 00 的兩條線：<code>clasp push</code> 走的是「本地 → GAS」（讓程式跑起來）；<code>git push</code> 走的是「本地 → GitHub」（做歷史備份與團隊協作）。測試 OK 後，把改動存進 GitHub：</p>
+      <pre><span class="k">cd</span> ..                   <span class="c"># 回 repo 根目錄</span>
+<span class="k">git</span> add .
+<span class="k">git</span> commit -m <span class="s">"feat(slackBotProxy): 加入 event 去重"</span>
+<span class="k">git</span> push               <span class="c"># 推到 GitHub</span></pre>
+      <div class="box tip"><b>兩個 push 徹底分清楚：</b><br>
+      • <code>clasp push</code> → 推到「線上 GAS」，讓 Slack / 觸發器跑到新碼<br>
+      • <code>git push</code> → 推到「GitHub」，做版本歷史與備份<br>
+      一個管「程式能不能跑」，一個管「改動有沒有留下紀錄」。兩件事，都要做。</div>
+    </section>
+
+    <!-- 06 -->
+    <section id="watch">
+      <h2><span class="step">06</span>即時同步：watch</h2>
+      <p class="lead">密集開發時，不想每改一次就手動 push，可以開 watch。</p>
+      <pre><span class="k">clasp</span> push --watch      <span class="c"># 監看 src/，一存檔就自動 push</span></pre>
+      <p>開著 watch，你在 VS Code 每按一次存檔，clasp 自動幫你 push 上去。適合「邊改邊在 GAS 測」的節奏。用完 <code>Ctrl + C</code> 結束監看。</p>
+      <div class="box warn"><strong>watch 期間別在線上編輯器改。</strong> 兩邊同時改會打架——watch 一 push 就蓋掉你線上的手改。要嘛全本地、要嘛關掉 watch。</div>
+    </section>
+
+    <!-- 07 Web App 部署 -->
+    <section id="deploy">
+      <h2><span class="step">07</span>Web App 部署（有 doPost 才需要）</h2>
+      <p class="lead">只有對外服務型的 GAS 才要看這章。若你的專案有 <code>doPost(e)</code> / <code>doGet(e)</code>（例如 slackBotProxy 被 Slack 呼叫），這章很重要。</p>
+
+      <h3>核心觀念：push 不等於更新網址</h3>
+      <p>有 <code>doPost</code> 的 GAS 就是 <strong>Web App</strong>，有一個 <code>/exec</code> 網址對外。最容易踩的坑是：</p>
+      <div class="box danger"><strong>那個 /exec 網址跑的不是「最新程式碼」，是「某個部署版本」凍結的碼。</strong> 所以你 <code>clasp push</code> 改了 doPost，線上編輯器看到的是新碼，<b>但 Slack 打進來還是跑舊碼</b>——因為部署版本還指向你改之前那版。</div>
+      <p>結論：<strong>改完 doPost，push 之後還要「更新部署」</strong>，外部呼叫才會跑到新邏輯。</p>
+
+      <h3>方法 A：GAS 網頁端更新（推薦，最不會錯）</h3>
+      <p>GAS 編輯器 → 右上「部署」→「<b>管理部署作業</b>」→ 點現有部署的鉛筆（編輯）→ 版本選「<b>新版本</b>」→ 部署。<strong>網址不變、內容更新</strong>。</p>
+      <div class="box tip"><b>為什麼推薦網頁端？</b> clasp 的 deploy 版本管理容易亂（一不小心就生出新網址）。多數人開發 GAS Web App 時：<b>程式碼用 clasp push，更新部署這步在網頁端做</b>，最穩。</div>
+
+      <h3>方法 B：clasp 指令更新</h3>
+      <pre><span class="k">clasp</span> push                        <span class="c"># 1. 先推程式碼</span>
+<span class="k">clasp</span> deployments                 <span class="c"># 2. 看現有部署的 ID</span>
+<span class="k">clasp</span> deploy -i &lt;deploymentId&gt;    <span class="c"># 3. 更新「現有」部署（-i 很重要）</span></pre>
+      <div class="box danger"><strong>一定要帶 <code>-i &lt;deploymentId&gt;</code>。</strong> 用 <code>-i</code> 是更新現有部署、<b>網址不變</b>。若直接 <code>clasp deploy</code>（不帶 -i），會<b>生一個全新網址</b>，Slack 那邊設定的舊網址就沒更新到，等於白做。</div>
+
+      <h3>什麼時候要更新部署？什麼時候不用？</h3>
+      <table class="cmd">
+        <thead><tr><th>你改了什麼</th><th>要做什麼</th></tr></thead>
+        <tbody>
+          <tr><td>改 doPost / doGet 邏輯（影響外部呼叫）</td><td>clasp push <b>＋ 更新部署</b></td></tr>
+          <tr><td>只改「手動在編輯器跑」的 function</td><td>clasp push 就夠，<b>不用</b>更新部署</td></tr>
+          <tr><td>只改註解、重構、不影響行為</td><td>clasp push（+ git 版控）即可</td></tr>
+        </tbody>
+      </table>
+      <div class="box warn"><strong>slackBotProxy 的實務節奏：</strong> 改完 doPost → <code>clasp push</code> → 到 GAS 網頁端「管理部署作業 → 編輯 → 新版本」→ 回 Slack 頻道 @bot 測一次，確認跑到新邏輯。</div>
+    </section>
+
+    <!-- 08 -->
+    <section id="mono">
+      <h2><span class="step">08</span>Monorepo 多專案</h2>
+      <p class="lead">這個 repo 裝了多個 GAS，clasp 指令認「當前資料夾的 .clasp.json」。</p>
+      <p>所以操作某個專案前，一定要先 <code>cd</code> 進它的資料夾。clasp 才知道你要對哪個 Script ID 操作：</p>
+      <pre><span class="c"># 開發 slackBotProxy</span>
+<span class="k">cd</span> slackBotProxy
+<span class="k">clasp</span> pull
+<span class="c"># ... 改 ...</span>
+<span class="k">clasp</span> push
+<span class="k">cd</span> ..
+
+<span class="c"># 換開發 leaveManagement</span>
+<span class="k">cd</span> leaveManagement
+<span class="k">clasp</span> pull
+<span class="c"># ...</span></pre>
+      <div class="box danger"><strong>在根目錄直接打 clasp 會出錯或找錯專案。</strong> 根目錄沒有 .clasp.json（或找到別的），clasp 不知道對誰操作。<b>永遠先 cd 進子專案。</b></div>
+
+      <h3>一次同步所有專案</h3>
+      <p>若在 <code>package.json</code> 設了 <code>push:all</code> / <code>pull:all</code>，可在根目錄一次處理全部（需自行維護這些 script）：</p>
+      <pre><span class="k">npm</span> run pull:all        <span class="c"># 一次拉所有子專案</span>
+<span class="k">npm</span> run push:all        <span class="c"># 一次推所有子專案</span></pre>
+    </section>
+
+    <!-- 08 -->
+    <section id="cmd">
+      <h2><span class="step">09</span>指令速查</h2>
+      <p class="lead">日常最常用的就這些。</p>
+      <table class="cmd">
+        <thead><tr><th>指令</th><th>做什麼</th></tr></thead>
+        <tbody>
+          <tr><td>git pull</td><td>GitHub → 本地（開工前，拉隊友的碼）</td></tr>
+          <tr><td>clasp pull</td><td>線上 GAS → 本地（開工前，拉線上最新）</td></tr>
+          <tr><td>clasp push</td><td>本地 → 線上 GAS（改完推上去讓它跑）</td></tr>
+          <tr><td>clasp push -f</td><td>強制推，無條件蓋掉線上</td></tr>
+          <tr><td>clasp push --watch</td><td>監看存檔自動推</td></tr>
+          <tr><td>git add / commit / push</td><td>本地 → GitHub（存進版本歷史）</td></tr>
+          <tr><td>clasp open</td><td>用瀏覽器打開這個 GAS 專案（看執行紀錄、觸發器、手動跑 function 很方便）</td></tr>
+          <tr><td>clasp deployments</td><td>列出所有部署版本與其 ID（Web App 更新部署前先看這個）</td></tr>
+          <tr><td>clasp deploy -i &lt;id&gt;</td><td>更新現有部署、網址不變（Web App 改 doPost 後用）</td></tr>
+          <tr><td>clasp login</td><td>重新登入 / 授權</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <!-- 09 -->
+    <section id="trouble">
+      <h2><span class="step">10</span>狀況排除</h2>
+      <p class="lead">開發時最常撞到的幾種。</p>
+      <table class="cmd">
+        <thead><tr><th>症狀</th><th>原因 / 處理</th></tr></thead>
+        <tbody>
+          <tr><td>push 後 GAS 行為沒變</td><td>Web App 的「部署版本」還指向舊碼。到 GAS「管理部署作業」把版本更新為最新。</td></tr>
+          <tr><td>pull 蓋掉我沒存的改動</td><td>pull 前沒 commit。養成 pull 前先 <code>git commit</code> / <code>git stash</code>。</td></tr>
+          <tr><td>clasp 找不到專案 / 報錯</td><td>沒 cd 進子專案，當前目錄沒有對的 .clasp.json。先 <code>cd</code> 進去。</td></tr>
+          <tr><td>node:fs/promises constants 錯</td><td>Node 版本 < 18。確認 <code>node -v</code> 為 22（nvm 已設 default）。</td></tr>
+          <tr><td>clasp 指令打不動</td><td>mise activate 未生效。確認 <code>~/.zshrc</code> 有 <code>eval "$(mise activate zsh)"</code>，重開終端。</td></tr>
+          <tr><td>push 被擋（版本衝突）</td><td>線上有較新版。先 <code>clasp pull</code> 看線上內容，確認後再 push 或用 -f。</td></tr>
+          <tr><td>401 / 未授權</td><td>憑證失效。<code>clasp login</code> 重新登入。</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <footer>
+      B TEAM · F2E · clasp v3.3.0 日常開發 &nbsp;|&nbsp; 內部工程文件
+    </footer>
+  </main>
+</div>
+
+<script>
+  const links = Array.from(document.querySelectorAll('#nav a'));
+  const map = {};
+  links.forEach(a => { map[a.getAttribute('href').slice(1)] = a; });
+  const sections = links.map(a => document.getElementById(a.getAttribute('href').slice(1)));
+  const obs = new IntersectionObserver((entries) => {
+    entries.forEach(e => {
+      if (e.isIntersecting) {
+        links.forEach(l => l.classList.remove('active'));
+        if (map[e.target.id]) map[e.target.id].classList.add('active');
+      }
+    });
+  }, { rootMargin: '-10% 0px -75% 0px', threshold: 0 });
+  sections.forEach(s => s && obs.observe(s));
+</script>
+</body>
+</html>
