@@ -93,6 +93,10 @@ function _routeSlashCommand_(e, provider) {
       _triggerPipelineTask_('sa-pipeline', text, conv, user, provider);
       return ContentService.createTextOutput('🚀 收到，SA 系統分析任務派發中…');
 
+    case '/answer':
+      handleTextAnswer(text, conv, user, provider);
+      return ContentService.createTextOutput('📝 已收到你的答覆，正在處理…');
+
     case '/coding':
       provider.postMessage(channel, `<@${user}> ✅ coding 任務已收到\n參數：\`${text || '(無)'}\``);
       return ContentService.createTextOutput('🚀 收到，coding 處理中…');
@@ -138,6 +142,12 @@ function _routeMentionEvent_(event, provider) {
       _triggerPipelineTask_('sa-pipeline', args, conv, event.user, provider);
       break;
 
+    // 以文字回覆待決問題（按鈕只能傳回預設選項，表達不了「要改成什麼」）
+    case 'answer':
+    case 'ans':
+      handleTextAnswer(args, conv, event.user, provider);
+      break;
+
     case 'coding':
       provider.postMessage(event.channel, `<@${event.user}> ✅ coding 任務已收到\n參數：\`${args || '(無)'}\``, event.thread_ts);
       break;
@@ -154,7 +164,8 @@ function _routeMentionEvent_(event, provider) {
       provider.postMessage(
         event.channel,
         '👋 收到你的 @！\n' +
-        '• 可用指令：`@Alice ra <JIRA_ID>`, `@Alice sa <JIRA_ID>`\n' +
+        '• 啟動分析：`@Alice ra <JIRA_ID>`、`@Alice sa <JIRA_ID>`\n' +
+        '• 回覆待決問題：`@Alice answer <你的答覆>`（在決策卡片的 thread 內）\n' +
         '• 當前收到：`' + (cmd || '(空)') + ' ' + (args || '') + '`',
         event.thread_ts
       );
