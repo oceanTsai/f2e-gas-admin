@@ -134,11 +134,11 @@ ls -la slackBotProxy      # 要看到 .clasp.json 與 src/
 
 ### 1. 開工前：先拉最新
 
-不確定有沒有人在線上編輯器改過，**先 pull 再動手**：
+先拉 GitHub 上其他人的改動，再拉 GAS 線上編輯器的改動：
 
 ```bash
-cd slackBotProxy
-clasp pull
+git pull
+clasp pull --project slackBotProxy
 ```
 
 > ⚠️ `clasp pull` 會覆蓋本地檔案。如果本地有未 commit 的改動，先 `git stash` 或 commit 再 pull。
@@ -150,21 +150,20 @@ clasp pull
 ### 3. 確認哪些檔案會被推上去
 
 ```bash
-clasp status
+clasp status --project slackBotProxy
 ```
 
 ### 4. 推上 GAS
 
 ```bash
-clasp push
+clasp push --project slackBotProxy
 ```
 
-推完可以用 `clasp open` 開啟線上編輯器確認。
+推完可以用 `clasp open --project slackBotProxy` 開啟線上編輯器確認。
 
 ### 5. 提交到 Git
 
 ```bash
-cd ..
 git add slackBotProxy/
 git commit -m "feat(slackBotProxy): 加入 XXX 功能"
 git push
@@ -178,7 +177,8 @@ sequenceDiagram
     participant GAS as Google Apps Script
     participant Git as GitHub
 
-    Dev->>GAS: clasp pull（拉最新）
+    Git->>Dev: git pull（拉 GitHub 最新）
+    Dev->>GAS: clasp pull（拉 GAS 最新）
     Note over Dev: 修改程式碼
     Dev->>Dev: clasp status（確認檔案）
     Dev->>GAS: clasp push（推上 GAS）
@@ -191,8 +191,8 @@ sequenceDiagram
 
 - **先 pull 再改**：避免本地跟線上不同步，push 時覆蓋別人的改動。
 - **先 push 再 commit**：確認 GAS 端沒問題再進版控。
-- **不要在 repo 根目錄跑 clasp**：一定要 `cd` 進子資料夾，否則會找不到 `.clasp.json` 或作用到錯誤的專案。
-- **線上編輯器改完也要同步**：如果臨時在線上改了，記得回來 `clasp pull` + git commit，保持版控一致。
+- **clasp 指令加 `--project`**：在 repo 根目錄用 `--project <資料夾>` 指定專案，不用 cd 來 cd 去。
+- **線上編輯器改完也要同步**：如果臨時在線上改了，記得回來 `clasp pull --project <資料夾>` + git commit，保持版控一致。
 
 ---
 
