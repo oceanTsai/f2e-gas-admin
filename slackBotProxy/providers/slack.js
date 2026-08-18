@@ -90,10 +90,11 @@ const SlackProvider = {
   },
 
   // 3. 解決/定案決策（替換卡片為純文字，消除按鈕）
-  resolveDecision: function(conv, messageId, choice, user, timeStr, jiraId) {
+  //    有 responseUrl 時優先用它：不需要讀 SLACK_TOKEN、少一次認證握手，
+  //    在 Slack 的 3 秒預算內更保險。
+  resolveDecision: function(conv, messageId, choice, user, timeStr, jiraId, responseUrl) {
     const channel = conv.channel;
     const ts = messageId;
-    if (!channel || !ts) return;
 
     const updatedBlocks = [
       {
@@ -105,7 +106,32 @@ const SlackProvider = {
       }
     ];
 
-    this.updateMessage(channel, ts, `✅ [${jiraId}] 決策已由 ${user} 選擇: ${choice}`, updatedBlocks);
+    const fallbackText = `✅ [${jiraId}] 決策已由 ${user} 選擇: ${choice}`;
+
+    if (responseUrl) {
+      try {
+        UrlFetchApp.fetch(responseUrl, {
+          method: 'post',
+          contentType: 'application/json',
+          payload: JSON.stringify({
+            response_type: 'in_channel',
+            replace_original: true,
+            text: fallbackText,
+            blocks: updatedBlocks
+          }),
+          muteHttpExceptions: true
+        });
+        return;
+      } catch (err) {
+        console.warn('response_url 更新失敗，改用 chat.update:', err);
+      }
+    }
+
+    if (!channel || !ts) {
+      console.error('resolveDecision: 缺少 channel/ts 且無 response_url，卡片按鈕未能消除');
+      return;
+    }
+    this.updateMessage(channel, ts, fallbackText, updatedBlocks);
   },
 
   // 4. 解析 Slack 按鈕互動 payload
@@ -127,18 +153,21 @@ const SlackProvider = {
     const userId = payload.user ? payload.user.id : '';
     const channel = payload.channel ? payload.channel.id : null;
     const messageTs = payload.message ? payload.message.ts : null;
+    // thread 錨點要取 thread_ts；message.ts 是這張卡片自己的 ts，拿它當錨點會讓
+    // 後續訊息掛在錯誤的位置。卡片不在 thread 內時才退回 ts。
+    const threadTs = (payload.message && payload.message.thread_ts) || messageTs;
 
     return {
       questionId: actionData.question_id,
       choice: actionData.choice,
       jiraId: actionData.jira_id,
       pipeline: actionData.pipeline || 'sa-pipeline',
-      user: `<@${userId}>` || user,
+      user: userId ? `<@${userId}>` : user,
       userId: userId,
       conversation: {
         provider: 'slack',
         channel: channel,
-        thread: messageTs
+        thread: threadTs
       },
       messageId: messageTs,
       // response_url 有效 30 分鐘，用來發只有點擊者看得到的 ephemeral 提示

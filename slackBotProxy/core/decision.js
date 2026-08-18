@@ -61,9 +61,10 @@ function handleInteraction(payload, provider, key) {
   const conv = interaction.conversation;
   const messageId = interaction.messageId;
 
-  // 使用 LockService 防止同時間多人連點競態
+  // 使用 LockService 防止同時間多人連點競態。
+  // 等鎖時間刻意壓到 1.5 秒：Slack 要求 3 秒內回應，等太久會讓使用者看到 operation_timeout。
   const lock = LockService.getScriptLock();
-  const hasLock = lock.tryLock(3000);
+  const hasLock = lock.tryLock(1500);
 
   if (!hasLock) {
     provider.notifyTransient(interaction, '⏳ 系統正在處理其他決策，請稍候幾秒再點一次。');
@@ -87,11 +88,18 @@ function handleInteraction(payload, provider, key) {
     const now = new Date();
     const timeStr = Utilities.formatDate(now, 'Asia/Taipei', 'HH:mm:ss');
 
-    // 1. 即時將卡片按鈕替換為純文字，消除按鈕防止再次點擊
-    provider.resolveDecision(conv, messageId, choice, user, timeStr, jiraId);
-
-    // 2. 觸發 GitHub Actions 恢復 Pipeline (repository_dispatch: resume)
+    // ── 3 秒預算內的執行順序（順序是刻意的）──
+    // 1. 先觸發 resume：這是唯一不可失敗的動作。若整體超過 3 秒被 Slack 判逾時，
+    //    GAS 本身仍會跑完，但把最關鍵的一步放在前面可將風險降到最低。
     dispatchResume(jiraId, pipeline, questionId, choice, user);
+
+    // 2. 再更新卡片消除按鈕。優先走 response_url（免 token、少一次認證握手），
+    //    失敗才退回 chat.update。
+    //    若日後實測仍常逾時，升級路徑是把 dispatch 丟進 PropertiesService 佇列，
+    //    改由 ScriptApp.newTrigger(...).after(1000) 非同步送出——代價是需要
+    //    script.scriptapp 授權，且多出「trigger 沒跑就永遠不 resume」的靜默失敗模式，
+    //    因此目前不採用。
+    provider.resolveDecision(conv, messageId, choice, user, timeStr, jiraId, interaction.responseUrl);
 
   } finally {
     lock.releaseLock();
