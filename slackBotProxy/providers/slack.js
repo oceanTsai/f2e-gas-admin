@@ -140,8 +140,33 @@ const SlackProvider = {
         channel: channel,
         thread: messageTs
       },
-      messageId: messageTs
+      messageId: messageTs,
+      // response_url 有效 30 分鐘，用來發只有點擊者看得到的 ephemeral 提示
+      responseUrl: payload.response_url || null
     };
+  },
+
+  // 5. 對點擊者發送僅自己可見的暫時提示（絕不改動原卡片）
+  notifyTransient: function(interaction, text) {
+    const url = interaction && interaction.responseUrl;
+    if (!url) {
+      console.warn('notifyTransient: 缺少 response_url，略過提示');
+      return;
+    }
+    try {
+      UrlFetchApp.fetch(url, {
+        method: 'post',
+        contentType: 'application/json',
+        payload: JSON.stringify({
+          response_type: 'ephemeral',
+          replace_original: false,
+          text: text
+        }),
+        muteHttpExceptions: true
+      });
+    } catch (err) {
+      console.error('notifyTransient 失敗:', err);
+    }
   },
 
   // Slack API 封裝

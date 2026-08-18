@@ -17,9 +17,11 @@ function doPost(e) {
     }
 
     // 【分支 2】按鈕互動 (Interactivity)
+    // 注意：/exec 為 ANYONE_ANONYMOUS 且 GAS 的 doPost(e) 取不到 HTTP headers，
+    // 無法驗 X-Slack-Signature；改以 URL 的 ?k= 作為唯一憑據，故必須往下傳。
     if (e.parameter && e.parameter.payload) {
       const payload = JSON.parse(e.parameter.payload);
-      return handleInteraction(payload, provider);
+      return handleInteraction(payload, provider, e.parameter.k);
     }
 
     // 【分支 3】Slash Command

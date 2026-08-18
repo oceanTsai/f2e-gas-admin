@@ -31,6 +31,10 @@ const GoogleChatProvider = {
     return null;
   },
 
+  notifyTransient: function(interaction, text) {
+    console.log('[GoogleChat] notifyTransient:', text);
+  },
+
   postMessage: function(channel, text, threadTs, blocks) {
     console.log('[GoogleChat] postMessage:', channel, text);
   },

@@ -33,10 +33,24 @@ function handleDecisionRequest(body, key, provider) {
   })).setMimeType(ContentService.MimeType.JSON);
 }
 
-function handleInteraction(payload, provider) {
+// 互動回應必須是空 body：Slack 會把任何非空回應當成「替換原訊息」的內容，
+// 一旦回傳純文字，整張卡片（含按鈕）就會被那行字取代——問題還沒回答，按鈕卻永久消失。
+// 所有要給使用者看的提示，一律走 response_url 的 ephemeral 訊息。
+function _emptyResponse_() {
+  return ContentService.createTextOutput('');
+}
+
+function handleInteraction(payload, provider, key) {
+  // 金鑰驗證：與 decision 請求同一把 NOTIFY_KEY（Slack 的 Interactivity URL 可帶 query param）
+  const notifyKey = PropertiesService.getScriptProperties().getProperty('NOTIFY_KEY');
+  if (notifyKey && key !== notifyKey) {
+    console.error('handleInteraction: 未授權的請求（notify key 不符）');
+    return _emptyResponse_();
+  }
+
   const interaction = provider.parseInteraction(payload);
   if (!interaction) {
-    return ContentService.createTextOutput('');
+    return _emptyResponse_();
   }
 
   const questionId = interaction.questionId;
@@ -52,20 +66,23 @@ function handleInteraction(payload, provider) {
   const hasLock = lock.tryLock(3000);
 
   if (!hasLock) {
-    return ContentService.createTextOutput('系統忙碌中，請稍後');
+    provider.notifyTransient(interaction, '⏳ 系統正在處理其他決策，請稍候幾秒再點一次。');
+    return _emptyResponse_();
   }
 
   try {
     const cache = CacheService.getScriptCache();
     const cacheKey = `answered_${questionId}`;
 
-    if (cache.get(cacheKey)) {
-      // 該問題已經回答過，直接略過
-      return ContentService.createTextOutput('');
+    const answeredBy = cache.get(cacheKey);
+    if (answeredBy) {
+      // 已有人先點過：只對這位使用者顯示提示，不動原卡片
+      provider.notifyTransient(interaction, `ℹ️ 此問題已由 ${answeredBy} 回答，本次點擊不生效。`);
+      return _emptyResponse_();
     }
 
-    // 標記為已回答 (快取 6 小時)
-    cache.put(cacheKey, 'true', 21600);
+    // 標記為已回答並記下回答者 (快取 6 小時)，供後到者的提示使用
+    cache.put(cacheKey, String(user), 21600);
 
     const now = new Date();
     const timeStr = Utilities.formatDate(now, 'Asia/Taipei', 'HH:mm:ss');
@@ -80,5 +97,5 @@ function handleInteraction(payload, provider) {
     lock.releaseLock();
   }
 
-  return ContentService.createTextOutput('');
+  return _emptyResponse_();
 }
