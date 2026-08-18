@@ -103,7 +103,8 @@ function _loadDecisionContext_(questionId, thread) {
   // 未指定編號時，挑「還沒被回答」的第一題。多題情境下這是最符合直覺的解讀。
   const cache = CacheService.getScriptCache();
   const ids = ctx.question_ids || (ctx.question_id ? [ctx.question_id] : []);
-  const pending = ids.filter(function (qid) { return !cache.get('answered_' + qid); });
+  const msgId = ctx.message_id || '';
+  const pending = ids.filter(function (qid) { return !cache.get('answered_' + msgId + '_' + qid); });
   if (pending.length === 0) return null;
 
   ctx.question_id = pending[0];
@@ -179,7 +180,7 @@ function handleTextAnswer(args, conv, user, provider) {
 
   try {
     const cache = CacheService.getScriptCache();
-    const cacheKey = 'answered_' + ctx.question_id;
+    const cacheKey = 'answered_' + (ctx.message_id || '') + '_' + ctx.question_id;
     const answeredBy = cache.get(cacheKey);
     if (answeredBy) {
       provider.postMessage(conv.channel,
@@ -280,7 +281,7 @@ function handleInteraction(payload, provider, key) {
 
   try {
     const cache = CacheService.getScriptCache();
-    const cacheKey = `answered_${questionId}`;
+    const cacheKey = `answered_${messageId}_${questionId}`;
 
     const answeredBy = cache.get(cacheKey);
     if (answeredBy) {
@@ -316,7 +317,7 @@ function handleInteraction(payload, provider, key) {
     if (ctx && ctx.question_ids && ctx.question_ids.length) {
       const total = ctx.question_ids.length;
       const remaining = ctx.question_ids.filter(function (qid) {
-        return !cache.get('answered_' + qid);
+        return !cache.get('answered_' + messageId + '_' + qid);
       });
       const answered = total - remaining.length;
       progressText = (remaining.length === 0)
