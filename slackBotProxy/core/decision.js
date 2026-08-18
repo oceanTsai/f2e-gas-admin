@@ -34,6 +34,8 @@ function handleDecisionRequest(body, key, provider) {
     jira_id: jiraId,
     phase: phase,
     pipeline: pipeline,
+    // 閘門型（complete）問題不接受文字回覆，見 handleTextAnswer 的說明
+    resume_action: questionObj.resume_action || 'continue',
     conversation: conv,
     message_id: messageId
   });
@@ -117,6 +119,20 @@ function handleTextAnswer(args, conv, user, provider) {
   if (!ctx) {
     provider.postMessage(conv.channel,
       '<@' + user + '> \u26a0\ufe0f 找不到對應的待決問題。' + '\u000a' + USAGE, conv.thread);
+    return;
+  }
+
+  // 閘門型問題只能點按鈕，不能用文字回覆。
+  // 原因：resume_action = complete 時，phase-guard 只要看到「有答覆」就會判定
+  // COMPLETE_ONLY 直接放行下一階段——它不會（也不該）去解讀答覆的語意。
+  // 若允許文字回覆，使用者打「先不要跑」反而會讓下一階段跑起來，與意圖完全相反。
+  if (ctx.resume_action === 'complete') {
+    provider.postMessage(conv.channel,
+      '<@' + user + '> \u2139\ufe0f ' + ctx.question_id +
+      ' 是放行閘門，請直接點卡片上的按鈕。' + '\u000a' +
+      '若還不想放行，就先不要動作——卡片會留在這裡等你。' + '\u000a' +
+      '需要補充說明時請直接在 thread 討論，那不會觸發任何流程。',
+      conv.thread);
     return;
   }
 
