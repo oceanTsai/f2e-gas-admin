@@ -217,6 +217,36 @@ function handleTextAnswer(args, conv, user, provider) {
 }
 
 
+// ═══════════════════════════════════════════════════════════════════
+//  進度回報：更新同一則「任務受理」訊息（由 notify-progress.sh 呼叫）
+// ═══════════════════════════════════════════════════════════════════
+
+function handleProgressUpdate(body, key, provider) {
+  const notifyKey = PropertiesService.getScriptProperties().getProperty('NOTIFY_KEY');
+  if (notifyKey && key !== notifyKey) {
+    return ContentService.createTextOutput(JSON.stringify({ error: 'Unauthorized: invalid notify key' }))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+
+  const conv = body.conversation || {};
+  if (!conv.channel && !conv.space) {
+    return ContentService.createTextOutput(JSON.stringify({ error: 'Missing channel or space' }))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+
+  provider.updateProgress(conv, {
+    jiraId: body.jira_id,
+    pipeline: body.pipeline,
+    phases: body.phases || [],
+    pendingQuestions: body.pending_questions || 0,
+    runUrl: body.run_url || ''
+  });
+
+  return ContentService.createTextOutput(JSON.stringify({ status: 'ok' }))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
+
 function handleInteraction(payload, provider, key) {
   // 金鑰驗證：與 decision 請求同一把 NOTIFY_KEY（Slack 的 Interactivity URL 可帶 query param）
   const notifyKey = PropertiesService.getScriptProperties().getProperty('NOTIFY_KEY');

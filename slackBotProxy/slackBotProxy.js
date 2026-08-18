@@ -38,10 +38,14 @@ function doPost(e) {
         return ContentService.createTextOutput('Invalid JSON body');
       }
 
-      // JSON Body 傳送之 decision 請求
+      // JSON Body 傳送之 decision / progress 請求（皆來自 runner）
       if (body && body.action === 'decision') {
         const key = e.parameter ? e.parameter.k : null;
         return handleDecisionRequest(body, key, provider);
+      }
+      if (body && body.action === 'progress') {
+        const key = e.parameter ? e.parameter.k : null;
+        return handleProgressUpdate(body, key, provider);
       }
 
       // URL Verification 挑戰 (Slack 驗證)
@@ -189,14 +193,9 @@ function _triggerPipelineTask_(pipelineType, jiraId, conv, user, provider) {
   const ok = dispatchPipeline(pipelineType, cleanJiraId, anchoredConv);
 
   if (ok) {
-    provider.postMessage(
-      anchoredConv.channel,
-      `🤖 <@${user}> 已成功觸發 ${pipelineType.toUpperCase()}！\n` +
-      `• **Jira ID**：\`${cleanJiraId}\`\n` +
-      `• **對話錨點**：\`${anchoredConv.thread || anchoredConv.channel}\`\n` +
-      `• [查看 Actions 執行進度](https://github.com/${AUGMA_GITHUB_REPO}/actions)`,
-      anchoredConv.thread
-    );
+    // 刻意不再發第二則訊息：上面那則「任務受理」會被 notify-progress 持續更新成
+    // 進度看板（含階段清單與 Actions 連結），再發一則只是洗頻。
+    console.log('已觸發 ' + pipelineType + '：' + cleanJiraId);
   } else {
     provider.postMessage(
       anchoredConv.channel,

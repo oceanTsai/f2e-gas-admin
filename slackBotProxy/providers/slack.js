@@ -11,12 +11,63 @@ const SlackProvider = {
     const channel = conv.channel;
     const threadTs = conv.thread || null;
     const res = this.postMessage(channel, text, threadTs);
-    const anchor = threadTs || (res ? res.ts : null);
+    const acceptedTs = res ? res.ts : null;
     return {
       provider: 'slack',
       channel: channel,
-      thread: anchor
+      // thread：後續訊息要掛在哪。使用者在既有 thread 內 @ 時沿用那個 thread
+      thread: threadTs || acceptedTs,
+      // status_ts：進度回報要 chat.update 的目標，**必須**是我們自己發的受理訊息。
+      // 不能用 thread——在既有 thread 內觸發時那是別人的訊息，bot 無權更新。
+      status_ts: acceptedTs
     };
+  },
+
+  // 進度看板：持續更新同一則受理訊息，不洗頻
+  updateProgress: function(conv, info) {
+    const ts = conv.status_ts;
+    if (!conv.channel || !ts) {
+      console.warn('updateProgress: 缺少 channel/status_ts，略過');
+      return;
+    }
+
+    const ICON = {
+      completed: '✅',
+      running: '🔄',
+      awaiting_decision: '🟡',
+      failed: '❌',
+      pending: '⬜'
+    };
+
+    const lines = (info.phases || []).map(function (p) {
+      const icon = ICON[p.status] || '⬜';
+      const tail = (p.status === 'running') ? '　_執行中…_'
+                 : (p.status === 'awaiting_decision') ? '　_等待決策_'
+                 : '';
+      return icon + ' `' + p.command + '`' + tail;
+    });
+
+    const done = (info.phases || []).filter(function (p) { return p.status === 'completed'; }).length;
+    const total = (info.phases || []).length;
+
+    let header = '🚀 *' + info.jiraId + '*　`' + info.pipeline + '`　(' + done + '/' + total + ')';
+    if (info.pendingQuestions > 0) {
+      header += '\n🟡 有 *' + info.pendingQuestions + '* 題待決議，請看本 thread 內的決策卡片';
+    }
+
+    const blocks = [
+      { type: 'section', text: { type: 'mrkdwn', text: header } },
+      { type: 'section', text: { type: 'mrkdwn', text: lines.join('\n') || '_尚無階段資訊_' } }
+    ];
+    if (info.runUrl) {
+      blocks.push({
+        type: 'context',
+        elements: [{ type: 'mrkdwn', text: '<' + info.runUrl + '|查看 Actions 執行紀錄>' }]
+      });
+    }
+
+    this.updateMessage(conv.channel, ts,
+      info.jiraId + ' ' + info.pipeline + '（' + done + '/' + total + '）', blocks);
   },
 
   // 2. 貼出決策互動卡片：一張訊息、逐題一組按鈕

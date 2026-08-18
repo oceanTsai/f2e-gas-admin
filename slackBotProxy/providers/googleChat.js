@@ -29,8 +29,10 @@ const GoogleChatProvider = {
   implemented: false,
 
   postAccepted:     function() { _googleChatNotImplemented_('postAccepted'); },
+  updateProgress:   function() { _googleChatNotImplemented_('updateProgress'); },
   postDecision:     function() { _googleChatNotImplemented_('postDecision'); },
   resolveDecision:  function() { _googleChatNotImplemented_('resolveDecision'); },
+  uploadFiles:      function() { _googleChatNotImplemented_('uploadFiles'); },
   parseInteraction: function() { _googleChatNotImplemented_('parseInteraction'); },
   notifyTransient:  function() { _googleChatNotImplemented_('notifyTransient'); },
   postMessage:      function() { _googleChatNotImplemented_('postMessage'); },
