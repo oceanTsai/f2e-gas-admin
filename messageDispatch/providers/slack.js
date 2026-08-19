@@ -30,9 +30,17 @@ const SlackProvider = {
 
     const lines = (info.phases || []).map(function (p) {
       const icon = ICON[p.status] || '⬜';
-      const tail = (p.status === 'running') ? '　_執行中…_'
-                 : (p.status === 'awaiting_decision') ? '　_等待決策_'
-                 : '';
+      let tail = '';
+      if (p.status === 'running') {
+        // activity 是 agent／workflow 用 set-activity 寫的一行字（「抓取 Jira
+        // 工單與附件」之類）。沒有時退回「執行中…」——長時間的 Phase 在人眼裡
+        // 是一片空白，這一行就是唯一的訊息。
+        const act = String(p.activity || '').trim();
+        tail = act ? ('　_' + (act.length > 40 ? act.slice(0, 39) + '…' : act) + '…_')
+                   : '　_執行中…_';
+      } else if (p.status === 'awaiting_decision') {
+        tail = '　_等待決策_';
+      }
       return icon + ' `' + p.command + '`' + tail;
     });
 

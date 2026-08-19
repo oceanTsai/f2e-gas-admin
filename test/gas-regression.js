@@ -395,4 +395,59 @@ console.log('\n[4] messageDispatch — 出向路由與金鑰驗證');
   `);
 }
 
+// ══════════════════════════════════════════════════════════════════
+console.log();
+console.log('[5] messageDispatch — 進度看板渲染 activity');
+// 長時間的 Phase 在人眼裡是一片空白，running 那一行的 activity 是唯一的訊息。
+// ══════════════════════════════════════════════════════════════════
+{
+  const env = mkEnv({ SLACK_BOT_TOKEN: 'xoxb-test' });
+  Object.assign(global, env.globals);
+
+  eval(src(['messageDispatch/providers/slack.js']) + `
+  const captured = [];
+  SlackProvider.updateMessage = function (ch, ts, text, blocks) {
+    captured.push({ text: text, blocks: blocks });
+    return {};
+  };
+
+  function render(phases, pendingQ) {
+    captured.length = 0;
+    SlackProvider.updateProgress({ channel: 'C1', status_ts: '1700.1' }, {
+      jiraId: 'VIPOP-46789', pipeline: 'ra-pipeline',
+      pendingQuestions: pendingQ || 0, runUrl: '', phases: phases
+    });
+    return captured[0].blocks[1].text.text;
+  }
+
+  // 有 activity → 顯示它
+  let out = render([
+    { command: 'ra-phase1', status: 'completed', activity: '' },
+    { command: 'ra-phase2', status: 'running', activity: '抓取 Jira 工單與附件' }
+  ]);
+  assert.ok(out.indexOf('抓取 Jira 工單與附件') >= 0, '應顯示 activity：' + out);
+  assert.ok(out.indexOf('ra-phase1') >= 0 && out.indexOf('ra-phase2') >= 0);
+
+  // 沒有 activity → 退回「執行中…」，不能空著
+  out = render([{ command: 'ra-phase2', status: 'running', activity: '' }]);
+  assert.ok(out.indexOf('執行中') >= 0, '沒 activity 要退回執行中：' + out);
+
+  // 只有 running 顯示 activity；completed / awaiting_decision 不受影響
+  out = render([
+    { command: 'ra-phase1', status: 'completed', activity: '不該出現' },
+    { command: 'ra-phase2', status: 'awaiting_decision', activity: '也不該出現' }
+  ]);
+  assert.ok(out.indexOf('不該出現') < 0 && out.indexOf('也不該出現') < 0, out);
+  assert.ok(out.indexOf('等待決策') >= 0);
+
+  // 過長要截斷（Slack 那一行不該被單一 activity 撐爆）
+  out = render([{ command: 'ra-phase2', status: 'running', activity: 'X'.repeat(120) }]);
+  assert.ok(out.length < 200, '過長的 activity 應截斷，實際長度 ' + out.length);
+  assert.ok(out.indexOf('…') >= 0, '截斷要有省略號：' + out);
+
+  ok('running 顯示 activity、缺值退回「執行中」、其他狀態不受影響、過長截斷');
+  `);
+}
+
+
 console.log('\n✅ ' + passed + ' 項全部通過\n');
