@@ -265,6 +265,22 @@ console.log('\n[3] slackBotProxy — thread 反查與 dispatch 安全性');
   assert.strictEqual(rootCalls, 1, 'route 應命中 cache');
   ok('從 thread 第一則訊息反查單號 + cache（零跨專案狀態）');
 
+  // 不在 thread 裡 → null（正常情況，不該打 API）
+  const before = rootCalls;
+  assert.strictEqual(_resolveRouteFromThread_({ channel:'C1', thread:null }, provider), null);
+  assert.strictEqual(rootCalls, before, '沒有 thread_ts 時不該呼叫 Slack API');
+
+  // API 失敗（缺 scope）→ 帶 err，讓上層給得出可行動的訊息
+  const failing = { fetchThreadRoot: function () { return null; } };
+  const rf = _resolveRouteFromThread_({ channel:'C1', thread:'9999.9' }, failing);
+  assert.strictEqual(rf.j, '');
+  assert.strictEqual(rf.err, 'fetch-failed');
+
+  // 讀到了但第一則訊息沒有單號
+  const noJira = { fetchThreadRoot: function () { return '大家早'; } };
+  assert.strictEqual(_resolveRouteFromThread_({ channel:'C1', thread:'8888.8' }, noJira).err, 'no-jira-in-root');
+  ok('反查失敗能區分原因（fetch-failed / no-jira-in-root / 不在 thread）');
+
   posted.length = 0; calls.length = 0;
   handleTextAnswer('用 A 方案', IN, 'U1', provider);
   assert.ok(posted.some(t => t.indexOf('明確指定題號') >= 0));
@@ -296,6 +312,33 @@ console.log('\n[3] slackBotProxy — thread 反查與 dispatch 安全性');
   assert.ok(posted.some(t => t.indexOf('放行閘門') >= 0));
   assert.strictEqual(calls.length, 0);
   ok('閘門型（complete）拒絕文字回覆，只收按鈕');
+  `);
+}
+
+
+// ══════════════════════════════════════════════════════════════════
+console.log();
+console.log('[3b] slackBotProxy — 收到出向請求要明確報錯，不能靜默回 ok');
+// 拆分後若 AUGMA_NOTIFY_ENDPOINT 還指向這支，回純文字 'ok'（HTTP 200）會讓
+// notify-question.sh 判定「卡片送出成功」——單子就這樣無聲卡死。
+// ══════════════════════════════════════════════════════════════════
+{
+  const env = mkEnv();
+  Object.assign(global, env.globals);
+  global.getProvider = () => ({ name: 'slack', postMessage: () => ({}) });
+
+  eval(src(['slackBotProxy/core/github.js', 'slackBotProxy/core/decision.js',
+            'slackBotProxy/core/intent.js', 'slackBotProxy/slackBotProxy.js']) + `
+  ['decision', 'progress'].forEach(function (a) {
+    const body = doPost({ parameter: {}, postData: { contents: JSON.stringify({ action: a, jira_id: 'VIPOP-1' }) } })._t;
+    assert.ok(body.indexOf('"error"') >= 0, a + ' 應回帶 error 的 JSON，實際：' + body);
+    assert.ok(body.indexOf('messageDispatch') >= 0, '訊息要指出改去哪：' + body);
+    assert.notStrictEqual(body, 'ok', '絕不能回純文字 ok');
+  });
+
+  const qs = doPost({ parameter: { action: 'decision', k: 'x' } })._t;
+  assert.ok(qs.indexOf('"error"') >= 0, 'query string 形式也要擋：' + qs);
+  ok('出向請求（JSON body 與 query string 兩種）都回明確錯誤');
   `);
 }
 

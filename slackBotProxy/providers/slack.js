@@ -238,7 +238,7 @@ const SlackProvider = {
     const token = PropertiesService.getScriptProperties().getProperty('SLACK_BOT_TOKEN');
     if (!token) {
       console.error('未設定 SLACK_BOT_TOKEN，無法反查 thread 單號');
-      return '';
+      return null;
     }
 
     const url = 'https://slack.com/api/conversations.replies' +
@@ -253,15 +253,25 @@ const SlackProvider = {
       });
       const json = JSON.parse(res.getContentText());
       if (!json.ok) {
-        // missing_scope 是最常見的原因，訊息裡直接點出來省一輪除錯
-        console.error('conversations.replies 失敗:', json.error);
-        return '';
+        // 回 null（不是空字串）讓上層能分辨「讀不到」與「讀到了但沒有單號」——
+        // 前者要告訴使用者原因，後者才是真的無從判斷。
+        if (json.error === 'missing_scope') {
+          console.error('conversations.replies: missing_scope —— Alice 需要 ' +
+            'channels:history（公開頻道）／groups:history（私人頻道）。' +
+            '改過 scope 後必須重新安裝 App 才生效。needed=' + (json.needed || '?') +
+            ' provided=' + (json.provided || '?'));
+        } else if (json.error === 'not_in_channel') {
+          console.error('conversations.replies: not_in_channel —— 把 Alice 邀請進這個頻道');
+        } else {
+          console.error('conversations.replies 失敗:', json.error);
+        }
+        return null;
       }
       const first = (json.messages && json.messages[0]) || null;
       return first ? (first.text || '') : '';
     } catch (err) {
       console.error('conversations.replies 異常:', err);
-      return '';
+      return null;
     }
   }
 };

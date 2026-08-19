@@ -7,6 +7,15 @@ function doPost(e) {
   try {
     const provider = getProvider();
 
+    // 出向（貼卡片、進度看板）已拆到 messageDispatch 專案。收到出向請求時必須
+    // 明確報錯——notify-question.sh 只看 HTTP 狀態與「body 是不是帶 error 的
+    // JSON」，這支 Web App 預設會回純文字 'ok'（HTTP 200），那會被判定成
+    // 「卡片送出成功」而實際上什麼都沒發生：單子就這樣無聲卡死。
+    const qsAction = (e && e.parameter) ? e.parameter.action : null;
+    if (qsAction === 'decision' || qsAction === 'progress') {
+      return _outboundMovedError_(qsAction);
+    }
+
     // 【分支 1】按鈕互動 (Interactivity)
     // 注意：/exec 為 ANYONE_ANONYMOUS 且 GAS 的 doPost(e) 取不到 HTTP headers，
     // 無法驗 X-Slack-Signature；改以 URL 的 ?k= 作為唯一憑據，故必須往下傳。
@@ -35,6 +44,11 @@ function doPost(e) {
         return ContentService.createTextOutput(body.challenge);
       }
 
+      // 同上，但走 JSON body——notify-question.sh / notify-progress.sh 用的是這種
+      if (body && (body.action === 'decision' || body.action === 'progress')) {
+        return _outboundMovedError_(body.action);
+      }
+
       // ── Slack Events API 重送去重 ──
       // Slack 在 3 秒內沒收到 200 就重送（最多 3 次）。而 _triggerPipelineTask_ 要先貼
       // 受理訊息再 dispatch（兩次 UrlFetch），撞上 GAS 冷啟動就可能破 3 秒——同一句話
@@ -59,6 +73,16 @@ function doPost(e) {
     console.error('doPost 執行異常:', error);
     return ContentService.createTextOutput('Error: ' + error.message);
   }
+}
+
+
+function _outboundMovedError_(action) {
+  const msg = '出向請求（' + action + '）已改由 messageDispatch 專案處理。' +
+              '請把 augma 的 AUGMA_NOTIFY_ENDPOINT 指向 messageDispatch 的 /exec。';
+  console.error(msg);
+  return ContentService
+    .createTextOutput(JSON.stringify({ error: msg }))
+    .setMimeType(ContentService.MimeType.JSON);
 }
 
 

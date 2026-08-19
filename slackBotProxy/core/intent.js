@@ -17,6 +17,10 @@
 
 const JIRA_KEY_RE = /\b([A-Z][A-Z0-9]+-\d+)\b/;
 
+// 反查失敗時給出可行動的下一步。實務上幾乎都是 scope 沒補、或補了沒重新安裝 App。
+const ROUTE_HINT = '請直接說單號（例：`@Alice VIPOP-12345 進度`），'
+  + '或確認 Alice 有 `channels:history` 權限（改過 scope 後要重新安裝 App 才生效）。';
+
 // full 要排在 sa / ra 之前判斷：「ra 到 sa 一路跑完」同時命中三者
 const RE_FULL   = /(full|整套|全部跑|從頭跑|一路跑|端到端|ra\s*(到|＋|\+|and|then)\s*sa)/i;
 const RE_SA     = /(\bsa\b|系統分析|系統設計|架構分析|拆\s*task|工項拆解|design\s*doc)/i;
@@ -30,8 +34,10 @@ const RE_STATUS = /(狀態|進度|跑到哪|到哪了|做完了嗎|完成了嗎|
 //   認錯成 status → 使用者看到狀態摘要，再說一次就好（無副作用）
 //   漏認成答覆   → 在決策 thread 裡問「跑到哪了」會被 dispatch 出去當成答覆
 // 所以前綴與尾綴都允許組合（「這張單現在跑到哪了？」）。
+// 前綴後面允許「的」：「這張單的進度」「它現在的狀態」都是很自然的問法，
+// 而漏認的代價是把問句 dispatch 成答覆。
 const RE_PURE_STATUS =
-  /^((?:現在|目前|這張單|這單|它)\s*){0,2}(狀態|進度|跑到哪|到哪|怎麼樣|怎樣|如何|status|progress)\s*((?:了|嗎|呢|如何|怎樣|怎麼樣|喔|吧)\s*){0,2}[?？!！]*$/i;
+  /^((?:現在|目前|這張單|這單|這個單|它|他)\s*(?:的)?\s*){0,3}(狀態|進度|跑到哪|到哪|怎麼樣|怎樣|如何|status|progress)\s*((?:了|嗎|呢|如何|怎樣|怎麼樣|喔|吧|哦)\s*){0,2}[?？!！]*$/i;
 
 
 function _extractJiraKey_(text) {
@@ -55,18 +61,24 @@ function classifyIntent(text, conv, provider) {
 
   const jiraInText = _extractJiraKey_(raw);
   const route = _resolveRouteFromThread_(conv, provider);
+  // 反查失敗（讀不到 thread 第一則訊息）與「這個 thread 本來就沒有任務」是兩件
+  // 完全不同的事，但都會讓 route 沒有單號。分開才給得出可行動的訊息。
+  const routeFailed = !!(route && route.err);
+  const routeJira = (route && route.j) ? route.j : '';
 
   // ── 規則 1：整句就是狀態查詢 ──────────────────────────────────
   // 排在答覆之前，否則在決策 thread 裡問「進度？」會被當成答覆送出去。
   if (RE_PURE_STATUS.test(raw)) {
-    const jira = jiraInText || (route ? route.j : '');
+    const jira = jiraInText || routeJira;
     return {
       action: jira ? 'status' : 'unknown',
       jiraId: jira,
       answerText: '',
       confidence: jira ? 'high' : 'low',
-      matchedBy: 'pure-status',
-      restate: jira ? '' : '你想查哪張單的狀態？'
+      matchedBy: routeFailed ? 'pure-status-route-failed' : 'pure-status',
+      restate: jira ? '' : (routeFailed
+        ? '我讀不到這個 thread 的第一則訊息，所以不知道這是哪張單。' + ROUTE_HINT
+        : '你想查哪張單的狀態？')
     };
   }
 
@@ -74,10 +86,10 @@ function classifyIntent(text, conv, provider) {
   // 這是準確率最高的一條，因為它看的是**狀態**而不是語意：
   // 「用 A 方案」在決策 thread 裡是答覆，在空頻道裡毫無意義。
   // 句子自帶單號時不套用——那更像是要開新任務。
-  if (route && !jiraInText) {
+  if (routeJira && !jiraInText) {
     return {
       action: 'answer_question',
-      jiraId: route.j,
+      jiraId: routeJira,
       answerText: raw,
       confidence: 'high',
       matchedBy: 'thread-has-pending'
@@ -112,6 +124,14 @@ function classifyIntent(text, conv, provider) {
   }
 
   // ── 沒接住：記錄語料 ─────────────────────────────────────────
+  // 在 thread 內卻反查不到單號時，這是最常見的真正原因，直接講出來而不是說「沒把握」
+  if (routeFailed) {
+    return {
+      action: 'unknown', jiraId: '', answerText: '', confidence: 'low',
+      matchedBy: 'route-failed',
+      restate: '我讀不到這個 thread 的第一則訊息，所以不知道這是哪張單。' + ROUTE_HINT
+    };
+  }
   _recordIntentMiss_(raw, conv, 'no-match');
   return { action: 'unknown', jiraId: '', answerText: '', confidence: 'low', matchedBy: 'no-match', restate: '' };
 }

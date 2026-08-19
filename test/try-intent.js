@@ -52,10 +52,12 @@ const classify = eval(code + String.fromCharCode(10) + '(function (t, c, p) { re
 
 const provider = {
   name: 'slack',
-  // 模擬 thread 的第一則訊息。真實情況是「任務受理」訊息或決策卡片的 summary。
-  fetchThreadRoot: () => threadJira
-    ? '收到任務請求，正在啟動 RA-PIPELINE (' + threadJira + ')...'
-    : '',
+  // 模擬 thread 的第一則訊息。真實情況是進度看板、受理訊息或決策卡片的 summary。
+  // --thread-fail 模擬 conversations.replies 失敗（缺 channels:history）。
+  fetchThreadRoot: () => {
+    if (flags.includes('--thread-fail')) return null;
+    return threadJira ? 'VIPOP-46789 ra-pipeline（1/2）' : '';
+  },
   postMessage: () => ({}),
 };
 
@@ -67,6 +69,7 @@ const ACTION_EFFECT = {
   run_full:        '→ 觸發 full-pipeline（RA+SA 七階）',
   status:          '→ 讀 progress.json 回報狀態摘要',
   unknown:         '→ 反問，不執行任何動作',
+  route_failed:    '→ 反問並點出可能是缺 channels:history',
 };
 
 function show(text) {

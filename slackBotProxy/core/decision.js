@@ -18,10 +18,16 @@
 // ═══════════════════════════════════════════════════════════════════
 
 const ROUTE_CACHE_TTL = 21600;   // 6 小時，CacheService 上限
+const JIRA_IN_TEXT_RE = /\b([A-Z][A-Z0-9]+-\d+)\b/;
 
+// 回傳 null＝根本不在 thread 裡（正常情況，不是錯誤）。
+// 回傳 { j: '', err: '<原因>' }＝在 thread 裡但反查不出單號——這種情況要讓使用者
+// 知道原因，最常見的是缺 channels:history scope。
 function _resolveRouteFromThread_(conv, provider) {
   const channel = conv && conv.channel;
-  const thread = conv && (conv.thread || conv.channel);
+  // 只認真正的 thread_ts。舊版把 channel 當 fallback，但拿 channel id 去問
+  // conversations.replies 沒有意義，只是白打一次 API。
+  const thread = conv && conv.thread;
   if (!channel || !thread) return null;
 
   const cache = CacheService.getScriptCache();
@@ -29,12 +35,17 @@ function _resolveRouteFromThread_(conv, provider) {
   const hit = cache.get(ck);
   if (hit) return { j: hit };
 
-  if (!provider || !provider.fetchThreadRoot) return null;
-  const rootText = provider.fetchThreadRoot(channel, thread);
-  if (!rootText) return null;
+  if (!provider || !provider.fetchThreadRoot) return { j: '', err: 'no-provider' };
 
-  const m = String(rootText).toUpperCase().match(/\b([A-Z][A-Z0-9]+-\d+)\b/);
-  if (!m) return null;
+  const rootText = provider.fetchThreadRoot(channel, thread);
+  if (rootText === null) return { j: '', err: 'fetch-failed' };   // API 失敗（scope／token／網路）
+  if (!rootText) return { j: '', err: 'empty-root' };             // 讀到了但沒有文字
+
+  const m = String(rootText).toUpperCase().match(JIRA_IN_TEXT_RE);
+  if (!m) {
+    console.log('thread 第一則訊息裡沒有單號：' + String(rootText).slice(0, 120));
+    return { j: '', err: 'no-jira-in-root' };
+  }
 
   cache.put(ck, m[1], ROUTE_CACHE_TTL);
   return { j: m[1] };
@@ -129,9 +140,11 @@ function handleTextAnswer(args, conv, user, provider) {
 
   // thread → 哪張單（反查訊息，不存狀態；見上面的說明）
   const route = _resolveRouteFromThread_(conv, provider);
-  if (!route) {
+  if (!route || !route.j) {
     provider.postMessage(conv.channel,
-      '<@' + user + '> \u26a0\ufe0f 這裡沒有待決問題。' + '\u000a' + USAGE, conv.thread);
+      '<@' + user + '> \u26a0\ufe0f ' + ((route && route.err === 'fetch-failed')
+        ? '我讀不到這個 thread 的第一則訊息（多半是缺 `channels:history` 權限，改過 scope 後要重新安裝 App）。'
+        : '這裡沒有待決問題。') + '\u000a' + USAGE, conv.thread);
     return;
   }
 
