@@ -1,121 +1,98 @@
-// ═══════════════════════════════════════════════════════════════════
-//  決策核心處理模組 (Decision Core)
-//  負責決策請求驗證、卡片發布、LockService 防連點去重與 Pipeline 恢復
-// ═══════════════════════════════════════════════════════════════════
-
-function handleDecisionRequest(body, key, provider) {
-  const notifyKey = PropertiesService.getScriptProperties().getProperty('NOTIFY_KEY');
-
-  // 金鑰驗證
-  if (notifyKey && key !== notifyKey) {
-    return ContentService.createTextOutput(JSON.stringify({ error: 'Unauthorized: invalid notify key' }))
-      .setMimeType(ContentService.MimeType.JSON);
-  }
-
-  const jiraId = body.jira_id;
-  const phase = body.phase || 'unknown';
-  const pipeline = body.pipeline || 'sa-pipeline';
-  const conv = body.conversation || {};
-  // questions 為多題陣列；question 是舊版單題欄位，保留相容
-  const questions = (body.questions && body.questions.length)
-    ? body.questions
-    : [body.question || {}];
-  const attachments = body.attachments || [];
-
-  if (!conv.channel && !conv.space) {
-    return ContentService.createTextOutput(JSON.stringify({ error: 'Missing channel or space in conversation' }))
-      .setMimeType(ContentService.MimeType.JSON);
-  }
-
-  // 透過 Provider 貼出互動卡片（一張訊息、逐題一組按鈕）
-  const messageId = provider.postDecision(conv, {
-    questions: questions,
-    jiraId: jiraId,
-    phase: phase,
-    pipeline: pipeline,
-    attachments: attachments
-  });
-
-  // 存下決策上下文，供文字回覆（@Alice answer）反查。
-  // 按鈕點擊不需要這個（jira_id / pipeline 就藏在 button value 裡），但文字回覆只有
-  // 一句話，必須靠 thread 或 question_id 才能回推是哪張單、要接續哪個 pipeline。
-  _saveDecisionContext_({
-    question_ids: questions.map(function (q) { return q.id; }),
-    // 以第一題的 resume_action 代表整組（同一 Phase 的題目型別一致）
-    resume_action: questions[0].resume_action || 'continue',
-    jira_id: jiraId,
-    phase: phase,
-    pipeline: pipeline,
-    conversation: conv,
-    message_id: messageId
-  });
-
-  return ContentService.createTextOutput(JSON.stringify({
-    status: 'ok',
-    message: 'Decision card posted successfully',
-    message_id: messageId
-  })).setMimeType(ContentService.MimeType.JSON);
-}
 
 
 // ═══════════════════════════════════════════════════════════════════
-//  決策上下文存取（供 @Alice answer 文字回覆使用）
+//  反查「這個 thread 是哪張單」
 //
-//  用 ScriptProperties 而非 CacheService：決策可能隔天才回覆，
-//  CacheService 最長只有 6 小時。答覆後即刪除，避免無限累積。
+//  ⚠️ 這裡沒有任何持久狀態，是刻意的。
+//
+//  出向（貼卡片）已拆到 messageDispatch 專案，而 ScriptProperties 是 per-script
+//  的——兩個 GAS 專案完全不共用。所以「貼卡片時記下 thread 對應哪張單、答覆時
+//  讀出來」一拆就壞：寫在那邊，這邊讀不到。
+//
+//  正解不是找一個共享儲存，而是不要有狀態：thread 的第一則訊息本來就帶著單號
+//  （任務受理訊息、決策卡片的 summary 都有），反查它即可；其餘一切——pipeline、
+//  有哪些題、誰答過——都在 augma 的 progress.json 裡，那份有版控、是唯一真相。
+//
+//  CacheService 只是純快取：thread root 永遠不會變，同一個 thread 的第二次回覆
+//  就不必再打一次 Slack API。掉了隨時可重建，所以不是狀態。
 // ═══════════════════════════════════════════════════════════════════
 
-function _ctxThreadKey_(conv) {
+const ROUTE_CACHE_TTL = 21600;   // 6 小時，CacheService 上限
+
+function _resolveRouteFromThread_(conv, provider) {
+  const channel = conv && conv.channel;
   const thread = conv && (conv.thread || conv.channel);
-  return thread ? ('dctx_t_' + thread) : null;
-}
+  if (!channel || !thread) return null;
 
-function _saveDecisionContext_(ctx) {
-  const props = PropertiesService.getScriptProperties();
-  // 每題各存一份（供 @Alice answer Q-00X 直接命中）
-  (ctx.question_ids || []).forEach(function (qid) {
-    if (!qid) return;
-    const one = JSON.parse(JSON.stringify(ctx));
-    one.question_id = qid;
-    props.setProperty('dctx_q_' + qid, JSON.stringify(one));
-  });
-  // thread 再存一份（供在 thread 內省略編號時反查）
-  const tk = _ctxThreadKey_(ctx.conversation);
-  if (tk) props.setProperty(tk, JSON.stringify(ctx));
-}
-
-function _loadDecisionContext_(questionId, thread) {
-  const props = PropertiesService.getScriptProperties();
-
-  if (questionId) {
-    const raw = props.getProperty('dctx_q_' + questionId);
-    if (!raw) return null;
-    try { return JSON.parse(raw); } catch (err) { return null; }
-  }
-
-  if (!thread) return null;
-  const raw = props.getProperty('dctx_t_' + thread);
-  if (!raw) return null;
-
-  let ctx;
-  try { ctx = JSON.parse(raw); } catch (err) { return null; }
-
-  // 未指定編號時，挑「還沒被回答」的第一題。多題情境下這是最符合直覺的解讀。
   const cache = CacheService.getScriptCache();
-  const ids = ctx.question_ids || (ctx.question_id ? [ctx.question_id] : []);
-  const msgId = ctx.message_id || '';
-  const pending = ids.filter(function (qid) { return !cache.get('answered_' + msgId + '_' + qid); });
-  if (pending.length === 0) return null;
+  const ck = 'route_' + thread;
+  const hit = cache.get(ck);
+  if (hit) return { j: hit };
 
-  ctx.question_id = pending[0];
-  ctx.remaining = pending.length;
-  return ctx;
+  if (!provider || !provider.fetchThreadRoot) return null;
+  const rootText = provider.fetchThreadRoot(channel, thread);
+  if (!rootText) return null;
+
+  const m = String(rootText).toUpperCase().match(/\b([A-Z][A-Z0-9]+-\d+)\b/);
+  if (!m) return null;
+
+  cache.put(ck, m[1], ROUTE_CACHE_TTL);
+  return { j: m[1] };
 }
 
-// 只清掉「這一題」——同一張卡片的其他題還要能繼續回答
-function _clearQuestionContext_(questionId) {
-  if (!questionId) return;
-  PropertiesService.getScriptProperties().deleteProperty('dctx_q_' + questionId);
+
+// ═══════════════════════════════════════════════════════════════════
+//  progress.json 查詢輔助
+// ═══════════════════════════════════════════════════════════════════
+
+// 同一張單內 Q 編號唯一，所以 jira_id + question_id 就是去重的正確鍵；
+// 不必再靠 message_id（文字回覆走 app_mention，本來就拿不到卡片的 ts）。
+function _answerKey_(jiraId, questionId) {
+  return 'ans_' + jiraId + '_' + questionId;
+}
+
+function _findQuestion_(progress, questionId) {
+  const list = (progress && progress.pending_questions) || [];
+  for (let i = 0; i < list.length; i++) {
+    if (list[i] && list[i].id === questionId) return list[i];
+  }
+  return null;
+}
+
+// 兩層去重：CacheService 擋 6 小時內的連點與 in-flight（答案已 dispatch 但
+// resume workflow 還沒把 answered 寫回 progress.json 並 push）；progress.json
+// 的 answered 接手長期。舊版只有前者，所以 6 小時後同一顆按鈕可以再點一次。
+function _alreadyAnswered_(jiraId, questionId, question) {
+  const by = CacheService.getScriptCache().get(_answerKey_(jiraId, questionId));
+  if (by) return { answered: true, by: by };
+  if (question && question.answered) {
+    return { answered: true, by: question.answered_by || '（先前已回覆）' };
+  }
+  return { answered: false, by: null };
+}
+
+// 供 handleInteraction 顯示卡片進度用。刻意回傳與舊 ctx 相同的形狀
+// （question_ids / phase / pipeline），讓既有的顯示邏輯一行都不用改。
+function _cardProgress_(jiraId, questionId, progress, pipeline) {
+  if (!progress) return null;
+  const q = _findQuestion_(progress, questionId);
+  if (!q) return null;
+  const ids = ((progress.pending_questions) || [])
+    .filter(function (x) { return x && x.phase === q.phase; })
+    .map(function (x) { return x.id; });
+  return { question_ids: ids, phase: q.phase, pipeline: pipeline };
+}
+
+// 某個 phase 的整體進度：全部答完才會接續後續 Phase，人需要看得到還剩幾題
+function _phaseProgress_(progress, phase, jiraId) {
+  const cache = CacheService.getScriptCache();
+  const all = ((progress && progress.pending_questions) || []).filter(function (q) {
+    return q && q.phase === phase;
+  });
+  const remaining = all.filter(function (q) {
+    return !q.answered && !cache.get(_answerKey_(jiraId, q.id));
+  });
+  return { total: all.length, remaining: remaining, answered: all.length - remaining.length };
 }
 
 
@@ -131,9 +108,9 @@ function handleTextAnswer(args, conv, user, provider) {
   const raw = (args || '').trim();
 
   const USAGE = [
-    '用法：@Alice answer <你的答覆>',
-    '在決策卡片所在的 thread 內回覆可省略問題編號；',
-    '在其他地方請明確指定：@Alice answer Q-002 <你的答覆>'
+    '用法：在決策卡片所在的 thread 內回覆 `@Alice answer <你的答覆>`',
+    '要指定題號時：`@Alice answer Q-002 <你的答覆>`',
+    '（答覆要在卡片的 thread 內——Alice 靠 thread 才知道這是哪張單、要接續哪條 pipeline）'
   ].join('\u000a');
 
   if (!raw) {
@@ -150,10 +127,59 @@ function handleTextAnswer(args, conv, user, provider) {
     answerText = m[2].trim();
   }
 
-  const ctx = _loadDecisionContext_(questionId, conv.thread || conv.channel);
-  if (!ctx) {
+  // thread → 哪張單（反查訊息，不存狀態；見上面的說明）
+  const route = _resolveRouteFromThread_(conv, provider);
+  if (!route) {
     provider.postMessage(conv.channel,
-      '<@' + user + '> \u26a0\ufe0f 找不到對應的待決問題。' + '\u000a' + USAGE, conv.thread);
+      '<@' + user + '> \u26a0\ufe0f 這裡沒有待決問題。' + '\u000a' + USAGE, conv.thread);
+    return;
+  }
+
+  const jiraId = route.j;
+  const progress = fetchProgress(jiraId);
+  // pipeline 由 augma 寫進 progress.json（update-progress.sh init --pipeline）。
+  // 讀不到就不能 dispatch：猜錯會重觸發錯的 pipeline，而那是不可逆的
+  // （ra-pipeline 只跑兩階，full-pipeline 跑七階）。按鈕的 value 帶著正確的
+  // pipeline，所以請使用者改點按鈕，而不是替他賭一把。
+  const pipeline = (progress && progress.pipeline) || '';
+
+  // 決定要回答哪一題：指定了就用指定的，沒指定就挑第一個未答的
+  let question = null;
+  if (questionId) {
+    question = progress ? _findQuestion_(progress, questionId) : null;
+    if (progress && !question) {
+      provider.postMessage(conv.channel,
+        '<@' + user + '> 找不到 ' + jiraId + ' 的 ' + questionId + ' 這一題。', conv.thread);
+      return;
+    }
+    // progress 讀不到（產物還沒 push）但有明確題號 → 照樣 dispatch，只是跳過閘門
+    // 檢查與進度顯示。augma 的 update-progress.sh answer 找不到該題會自己失敗，
+    // 不會靜默寫錯。
+  } else {
+    if (!progress) {
+      provider.postMessage(conv.channel,
+        '<@' + user + '> 暫時讀不到 ' + jiraId +
+        ' 的流程狀態，請改成明確指定題號：`@Alice answer Q-001 <你的答覆>`',
+        conv.thread);
+      return;
+    }
+    const pendingCache = CacheService.getScriptCache();
+    const pending = ((progress.pending_questions) || []).filter(function (q) {
+      return q && !q.answered && !pendingCache.get(_answerKey_(jiraId, q.id));
+    });
+    if (pending.length === 0) {
+      provider.postMessage(conv.channel,
+        '<@' + user + '> ' + jiraId + ' 目前沒有待回覆的問題。', conv.thread);
+      return;
+    }
+    question = pending[0];
+    questionId = question.id;
+  }
+
+  if (!pipeline) {
+    provider.postMessage(conv.channel,
+      '<@' + user + '> 讀不到 ' + jiraId + ' 要接續哪條 pipeline，沒辦法安全地用文字接續。' +
+      '請直接點卡片上的按鈕（按鈕本身帶著這個資訊）。', conv.thread);
     return;
   }
 
@@ -161,9 +187,9 @@ function handleTextAnswer(args, conv, user, provider) {
   // 原因：resume_action = complete 時，phase-guard 只要看到「有答覆」就會判定
   // COMPLETE_ONLY 直接放行下一階段——它不會（也不該）去解讀答覆的語意。
   // 若允許文字回覆，使用者打「先不要跑」反而會讓下一階段跑起來，與意圖完全相反。
-  if (ctx.resume_action === 'complete') {
+  if (question && question.resume_action === 'complete') {
     provider.postMessage(conv.channel,
-      '<@' + user + '> \u2139\ufe0f ' + ctx.question_id +
+      '<@' + user + '> \u2139\ufe0f ' + questionId +
       ' 是放行閘門，請直接點卡片上的按鈕。' + '\u000a' +
       '若還不想放行，就先不要動作——卡片會留在這裡等你。' + '\u000a' +
       '需要補充說明時請直接在 thread 討論，那不會觸發任何流程。',
@@ -180,32 +206,34 @@ function handleTextAnswer(args, conv, user, provider) {
 
   try {
     const cache = CacheService.getScriptCache();
-    const cacheKey = 'answered_' + (ctx.message_id || '') + '_' + ctx.question_id;
-    const answeredBy = cache.get(cacheKey);
-    if (answeredBy) {
+    const cacheKey = _answerKey_(jiraId, questionId);
+    const dup = _alreadyAnswered_(jiraId, questionId, question);
+    if (dup.answered) {
       provider.postMessage(conv.channel,
-        '<@' + user + '> \u2139\ufe0f ' + ctx.question_id + ' 已由 ' + answeredBy + ' 回答，本次回覆不生效。',
+        '<@' + user + '> \u2139\ufe0f ' + questionId + ' 已由 ' + dup.by + ' 回答，本次回覆不生效。',
         conv.thread);
       return;
     }
     cache.put(cacheKey, '<@' + user + '>', 21600);
 
     // 1. 先觸發 resume（唯一不可失敗的動作）
-    const ok = dispatchResume(ctx.jira_id, ctx.pipeline, ctx.question_id, answerText, '<@' + user + '>');
+    const ok = dispatchResume(jiraId, pipeline, questionId, answerText, '<@' + user + '>');
 
     // 2. 刻意**不動原卡片**：文字回覆走 app_mention 事件，拿不到 payload.message.blocks，
     //    只能整張替換——那會把同一張卡片上其他題的按鈕一起吃掉。
-    //    該題若被重複點擊，會被 answered_<qid> 快取擋下並收到 ephemeral 提示，
-    //    所以按鈕留著不會造成重複處理。
+    //    該題若被重複點擊，會被去重擋下並收到提示，所以按鈕留著不會造成重複處理。
 
     if (ok) {
-      _clearQuestionContext_(ctx.question_id);
-      const remaining = (ctx.remaining || 1) - 1;
-      const tail = remaining > 0
-        ? '（本張卡片還有 ' + remaining + ' 題待回覆，全部答完才會接續）'
-        : '正在接續 ' + ctx.pipeline + '（' + ctx.jira_id + '）…';
+      let tail = '正在接續 ' + pipeline + '（' + jiraId + '）…';
+      if (progress && question) {
+        // cacheKey 已寫入，所以這裡算出的 remaining 已排除本題
+        const p = _phaseProgress_(progress, question.phase, jiraId);
+        if (p.remaining.length > 0) {
+          tail = '（本階段還有 ' + p.remaining.length + ' 題待回覆，全部答完才會接續）';
+        }
+      }
       provider.postMessage(conv.channel,
-        '\u2705 已收下 <@' + user + '> 對 ' + ctx.question_id + ' 的回覆。' + tail, conv.thread);
+        '\u2705 已收下 <@' + user + '> 對 ' + questionId + ' 的回覆。' + tail, conv.thread);
     } else {
       cache.remove(cacheKey);   // dispatch 失敗要讓人能重試
       provider.postMessage(conv.channel,
@@ -215,36 +243,6 @@ function handleTextAnswer(args, conv, user, provider) {
   } finally {
     lock.releaseLock();
   }
-}
-
-
-// ═══════════════════════════════════════════════════════════════════
-//  進度回報：更新同一則「任務受理」訊息（由 notify-progress.sh 呼叫）
-// ═══════════════════════════════════════════════════════════════════
-
-function handleProgressUpdate(body, key, provider) {
-  const notifyKey = PropertiesService.getScriptProperties().getProperty('NOTIFY_KEY');
-  if (notifyKey && key !== notifyKey) {
-    return ContentService.createTextOutput(JSON.stringify({ error: 'Unauthorized: invalid notify key' }))
-      .setMimeType(ContentService.MimeType.JSON);
-  }
-
-  const conv = body.conversation || {};
-  if (!conv.channel && !conv.space) {
-    return ContentService.createTextOutput(JSON.stringify({ error: 'Missing channel or space' }))
-      .setMimeType(ContentService.MimeType.JSON);
-  }
-
-  provider.updateProgress(conv, {
-    jiraId: body.jira_id,
-    pipeline: body.pipeline,
-    phases: body.phases || [],
-    pendingQuestions: body.pending_questions || 0,
-    runUrl: body.run_url || ''
-  });
-
-  return ContentService.createTextOutput(JSON.stringify({ status: 'ok' }))
-    .setMimeType(ContentService.MimeType.JSON);
 }
 
 
@@ -281,9 +279,24 @@ function handleInteraction(payload, provider, key) {
 
   try {
     const cache = CacheService.getScriptCache();
-    const cacheKey = `answered_${messageId}_${questionId}`;
+    const cacheKey = _answerKey_(jiraId, questionId);
 
-    const answeredBy = cache.get(cacheKey);
+    // 短期去重先查：連點是最常見的重複，本機命中就不必為它多打一次 GitHub。
+    const recentBy = cache.get(cacheKey);
+    if (recentBy) {
+      provider.notifyTransient(interaction, `ℹ️ 此問題已由 ${recentBy} 回答，本次點擊不生效。`);
+      return _emptyResponse_();
+    }
+
+    // 長期去重與進度都靠 progress.json——CacheService 只有 6 小時，過期後同一顆
+    // 按鈕會變成可以再點一次（舊版的破口）。這次讀取（約 250ms）刻意放在 dispatch
+    // 之前：去重放在觸發之後就沒有意義了。讀不到就降級成只有短期去重，dispatch 照做。
+    const progress = fetchProgress(jiraId);
+    const question = _findQuestion_(progress, questionId);
+
+    const answeredBy = (question && question.answered)
+      ? (question.answered_by || '（先前已回覆）')
+      : null;
     if (answeredBy) {
       // 已有人先點過：只對這位使用者顯示提示，不動原卡片
       provider.notifyTransient(interaction, `ℹ️ 此問題已由 ${answeredBy} 回答，本次點擊不生效。`);
@@ -297,6 +310,7 @@ function handleInteraction(payload, provider, key) {
     const timeStr = Utilities.formatDate(now, 'Asia/Taipei', 'HH:mm:ss');
 
     // ── 3 秒預算內的執行順序（順序是刻意的）──
+    // 0. 去重（cache 零延遲，必要時再讀 progress.json）——必須在觸發之前。
     // 1. 先觸發 resume：這是唯一不可失敗的動作。若整體超過 3 秒被 Slack 判逾時，
     //    GAS 本身仍會跑完，但把最關鍵的一步放在前面可將風險降到最低。
     const dispatched = dispatchResume(jiraId, pipeline, questionId, choice, user);
@@ -312,12 +326,12 @@ function handleInteraction(payload, provider, key) {
     }
 
     // 算出這張卡片的整體進度：全部答完才會接續後續 Phase，人需要看得到還剩幾題
-    const ctx = _loadDecisionContext_(questionId, null);
+    const ctx = _cardProgress_(jiraId, questionId, progress, pipeline);
     let progressText = '';
     if (ctx && ctx.question_ids && ctx.question_ids.length) {
       const total = ctx.question_ids.length;
       const remaining = ctx.question_ids.filter(function (qid) {
-        return !cache.get('answered_' + messageId + '_' + qid);
+        return !_alreadyAnswered_(jiraId, qid, _findQuestion_(progress, qid)).answered;
       });
       const answered = total - remaining.length;
       progressText = (remaining.length === 0)
@@ -327,8 +341,7 @@ function handleInteraction(payload, provider, key) {
           answered + '／' + total + '），**每題都回答完**才會接續後續流程。';
     }
 
-    // 只清掉這一題的上下文；同一張卡片的其他題還要能繼續回答
-    _clearQuestionContext_(questionId);
+    // 不需要清任何上下文：答覆狀態的真相在 progress.json，thread 映射由 GC 淘汰。
 
     // 2. 再更新卡片：替換這一題的按鈕區塊、就地更新進度行。
     //    以 chat.update 為主、response_url 為 fallback（見 slack.js 的說明）。
@@ -352,4 +365,135 @@ function handleInteraction(payload, provider, key) {
   }
 
   return _emptyResponse_();
+}
+
+
+// ═══════════════════════════════════════════════════════════════════
+//  狀態查詢：@Alice VIPOP-12345 進度
+//
+//  順便補上一個一直存在的信任缺口：unattended 模式下 agent 採預設值續跑時，
+//  會用 record-assumption 把假設寫進 progress.json 的 assumptions，但通訊層
+//  從來沒有顯示過它——人不知道 AI 幫他假設了什麼。這裡一併列出來。
+// ═══════════════════════════════════════════════════════════════════
+
+const PHASE_LABEL = {
+  'ra-phase1': 'RA① 資料抓取',
+  'ra-phase2': 'RA② 規格分析',
+  'sa-phase1': 'SA① 範疇判讀',
+  'sa-phase2': 'SA② Codebase 分析',
+  'sa-phase3': 'SA③ SA 文件',
+  'sa-phase4': 'SA④ Design 文件',
+  'sa-phase5': 'SA⑤ 工項拆解'
+};
+
+const PHASE_ICON = {
+  completed: '\u2705',
+  running: '\u23f3',
+  awaiting_decision: '\U0001f534',
+  failed: '\u274c'
+};
+
+function handleStatusQuery(jiraId, conv, user, provider) {
+  if (!jiraId) {
+    provider.postMessage(conv.channel,
+      '<@' + user + '> 要查哪張單？例：`@Alice VIPOP-12345 進度`', conv.thread);
+    return;
+  }
+
+  const progress = fetchProgress(jiraId);
+  if (!progress) {
+    provider.postMessage(conv.channel,
+      '<@' + user + '> 讀不到 ' + jiraId + ' 的狀態。可能還沒開始跑，或產物尚未推上分支。',
+      conv.thread);
+    return;
+  }
+
+  const lines = [];
+  lines.push('*' + jiraId + '* — 目前狀態');
+
+  const phases = progress.phases || {};
+  const keys = Object.keys(phases);
+  if (keys.length) {
+    keys.forEach(function (k) {
+      const st = (phases[k] && phases[k].status) || 'pending';
+      const icon = PHASE_ICON[st] || '\u26aa';
+      lines.push(icon + ' ' + (PHASE_LABEL[k] || k) + ' \u2014 ' + st);
+    });
+  } else {
+    lines.push('_尚無階段紀錄_');
+  }
+
+  const pend = (progress.pending_questions || []).filter(function (q) {
+    return q && !q.answered;
+  });
+  if (pend.length) {
+    lines.push('');
+    lines.push('\U0001f534 *' + pend.length + ' 題待回覆*（全部答完才會接續）：');
+    pend.slice(0, 5).forEach(function (q) {
+      lines.push('\u2022 `' + q.id + '` ' + String(q.question || '').slice(0, 90));
+    });
+    if (pend.length > 5) lines.push('_…另有 ' + (pend.length - 5) + ' 題_');
+  }
+
+  const assumptions = progress.assumptions || [];
+  if (assumptions.length) {
+    lines.push('');
+    lines.push('\u2139\ufe0f *採用了 ' + assumptions.length + ' 項假設*（無人值守下自動續跑）：');
+    assumptions.slice(0, 5).forEach(function (a) {
+      const note = (a && a.note) ? a.note : JSON.stringify(a);
+      const ph = (a && a.phase) ? ('`' + a.phase + '` ') : '';
+      lines.push('\u2022 ' + ph + String(note).slice(0, 90));
+    });
+    if (assumptions.length > 5) lines.push('_…另有 ' + (assumptions.length - 5) + ' 項_');
+  }
+
+  if (progress.last_error) {
+    lines.push('');
+    lines.push('\u274c *最近一次錯誤*（`' + (progress.last_error.phase || '') + '`）：' +
+               String(progress.last_error.message || '').slice(0, 160));
+  }
+
+  if (progress.updated_at) {
+    lines.push('');
+    lines.push('_最後更新：' + progress.updated_at + '_');
+  }
+
+  provider.postMessage(conv.channel, lines.join('\n'), conv.thread);
+}
+
+
+// ═══════════════════════════════════════════════════════════════════
+//  一次性清理：移除舊版留下的 ScriptProperties
+//
+//  舊版每一題都存一份完整的決策上下文（dctx_q_<qid>），thread 再存一份
+//  （dctx_t_<thread>），而且只有「成功答覆」時才刪——沒答的、被放棄的單、
+//  dispatch 失敗的那些，全部永久留著。約 150 張單就會撞到 500 KB 上限，
+//  然後 setProperty 開始拋錯、卡片再也發不出去。
+//
+//  現在這兩種 key 都沒有人讀了（thread 路由改成反查 Slack 訊息 + 讀
+//  progress.json），但它們不會自己消失。部署後在 GAS 編輯器手動執行這支一次，
+//  之後可以刪掉這段程式碼。
+// ═══════════════════════════════════════════════════════════════════
+
+function cleanupLegacyKeys() {
+  const props = PropertiesService.getScriptProperties();
+  const keys = props.getKeys();
+  const legacy = keys.filter(function (k) {
+    return k.indexOf('dctx_q_') === 0 || k.indexOf('dctx_t_') === 0;
+  });
+
+  if (!legacy.length) {
+    console.log('沒有舊版 key 需要清理（共 ' + keys.length + ' 個 property）。');
+    return;
+  }
+
+  let bytes = 0;
+  legacy.forEach(function (k) {
+    const v = props.getProperty(k);
+    bytes += k.length + (v ? v.length : 0);
+  });
+
+  legacy.forEach(function (k) { props.deleteProperty(k); });
+  console.log('已清除 ' + legacy.length + ' 個舊版 key，釋放約 ' +
+              Math.round(bytes / 1024 * 10) / 10 + ' KB（上限 500 KB）。');
 }

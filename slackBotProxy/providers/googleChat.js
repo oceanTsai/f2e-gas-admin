@@ -24,18 +24,22 @@ function _googleChatNotImplemented_(method) {
   throw new Error(`${GOOGLE_CHAT_NOT_IMPLEMENTED}（缺少：${method}）`);
 }
 
+//
+//  ⚠️ 下面的實作指引是**完整清單**，橫跨兩個專案：出向函式在 messageDispatch，
+//  入向函式在 slackBotProxy。這份檔案只會有屬於自己那一側的 key。
+//  【入向專用】stub，與 messageDispatch 那份同步維護。
+
 const GoogleChatProvider = {
   name: 'googlechat',
   implemented: false,
 
   postAccepted:     function() { _googleChatNotImplemented_('postAccepted'); },
-  updateProgress:   function() { _googleChatNotImplemented_('updateProgress'); },
-  postDecision:     function() { _googleChatNotImplemented_('postDecision'); },
   resolveDecision:  function() { _googleChatNotImplemented_('resolveDecision'); },
-  uploadFiles:      function() { _googleChatNotImplemented_('uploadFiles'); },
   parseInteraction: function() { _googleChatNotImplemented_('parseInteraction'); },
   notifyTransient:  function() { _googleChatNotImplemented_('notifyTransient'); },
   postMessage:      function() { _googleChatNotImplemented_('postMessage'); },
   updateMessage:    function() { _googleChatNotImplemented_('updateMessage'); },
   postWebhook:      function() { _googleChatNotImplemented_('postWebhook'); },
+
+  fetchThreadRoot:  function() { _googleChatNotImplemented_('fetchThreadRoot'); }
 };

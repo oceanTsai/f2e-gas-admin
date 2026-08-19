@@ -7,16 +7,7 @@ function doPost(e) {
   try {
     const provider = getProvider();
 
-    // 【分支 1】Decision Gateway 通知請求 (來自 Runner / notify-question.sh)
-    if (e.parameter && e.parameter.action === 'decision') {
-      let body = {};
-      if (e.postData && e.postData.contents) {
-        try { body = JSON.parse(e.postData.contents); } catch (err) {}
-      }
-      return handleDecisionRequest(body, e.parameter.k, provider);
-    }
-
-    // 【分支 2】按鈕互動 (Interactivity)
+    // 【分支 1】按鈕互動 (Interactivity)
     // 注意：/exec 為 ANYONE_ANONYMOUS 且 GAS 的 doPost(e) 取不到 HTTP headers，
     // 無法驗 X-Slack-Signature；改以 URL 的 ?k= 作為唯一憑據，故必須往下傳。
     if (e.parameter && e.parameter.payload) {
@@ -24,12 +15,13 @@ function doPost(e) {
       return handleInteraction(payload, provider, e.parameter.k);
     }
 
-    // 【分支 3】Slash Command
+    // 【分支 2】Slash Command
     if (e.parameter && e.parameter.command) {
       return _routeSlashCommand_(e, provider);
     }
 
-    // 【分支 4】Event (如 @Alice app_mention) 或 JSON Body
+    // 【分支 3】Event（@Alice app_mention）
+    // 出向的 decision / progress 已拆到 messageDispatch 專案，這裡不再受理。
     if (e.postData && e.postData.contents) {
       let body;
       try {
@@ -38,19 +30,22 @@ function doPost(e) {
         return ContentService.createTextOutput('Invalid JSON body');
       }
 
-      // JSON Body 傳送之 decision / progress 請求（皆來自 runner）
-      if (body && body.action === 'decision') {
-        const key = e.parameter ? e.parameter.k : null;
-        return handleDecisionRequest(body, key, provider);
-      }
-      if (body && body.action === 'progress') {
-        const key = e.parameter ? e.parameter.k : null;
-        return handleProgressUpdate(body, key, provider);
-      }
-
       // URL Verification 挑戰 (Slack 驗證)
       if (body.type === 'url_verification') {
         return ContentService.createTextOutput(body.challenge);
+      }
+
+      // ── Slack Events API 重送去重 ──
+      // Slack 在 3 秒內沒收到 200 就重送（最多 3 次）。而 _triggerPipelineTask_ 要先貼
+      // 受理訊息再 dispatch（兩次 UrlFetch），撞上 GAS 冷啟動就可能破 3 秒——同一句話
+      // 會觸發兩三次 pipeline，而 phase job 的 concurrency 是 cancel-in-progress，
+      // 後到的那次會在前一次 commit 中途把它砍掉。
+      //
+      // 只有 Events API 需要這層：slash command 與 interactivity 逾時只是顯示錯誤，
+      // Slack 不會重送；decision / progress / url_verification 也都沒有 event_id。
+      if (_isDuplicateEvent_(body.event_id)) {
+        console.log('略過 Slack 重送事件：' + body.event_id);
+        return ContentService.createTextOutput('duplicate ignored');
       }
 
       // app_mention 事件
@@ -64,6 +59,23 @@ function doPost(e) {
     console.error('doPost 執行異常:', error);
     return ContentService.createTextOutput('Error: ' + error.message);
   }
+}
+
+
+// ═══════════════════════════════════════════════════════════════════
+//  重送去重
+//
+//  競態說明：Slack 的重送至少間隔一秒，而 cache.put 在進入實際處理之前就完成，
+//  所以這裡刻意不上鎖——為每個事件取一次 LockService 的排隊成本，大於這點殘餘風險。
+// ═══════════════════════════════════════════════════════════════════
+
+function _isDuplicateEvent_(eventId) {
+  if (!eventId) return false;
+  const cache = CacheService.getScriptCache();
+  const key = 'evt_' + eventId;
+  if (cache.get(key)) return true;
+  cache.put(key, '1', 600);   // Slack 的重送都在數十秒內結束，10 分鐘綽綽有餘
+  return false;
 }
 
 
@@ -164,15 +176,11 @@ function _routeMentionEvent_(event, provider) {
       provider.postMessage(event.channel, `<@${event.user}> 🐛 bug 已送進 triage\n內容：\`${args || '(無)'}\``, event.thread_ts);
       break;
 
+    // 不是已知指令 → 交給意圖識別（規則層）。
+    // 已知指令刻意不走這條：意圖層掛掉時系統還能用，熟練使用者打指令也更快。
     default:
-      provider.postMessage(
-        event.channel,
-        '👋 收到你的 @！\n' +
-        '• 啟動分析：`@Alice ra <JIRA_ID>`、`@Alice sa <JIRA_ID>`\n' +
-        '• 回覆待決問題：`@Alice answer <你的答覆>`（在決策卡片的 thread 內）\n' +
-        '• 當前收到：`' + (cmd || '(空)') + ' ' + (args || '') + '`',
-        event.thread_ts
-      );
+      routeByIntent(text, conv, event.user, provider);
+      break;
   }
   return ContentService.createTextOutput('ok');
 }
@@ -184,6 +192,22 @@ function _triggerPipelineTask_(pipelineType, jiraId, conv, user, provider) {
   }
 
   const cleanJiraId = jiraId.trim().toUpperCase();
+
+  // 第二層防線：同一張單短時間內只觸發一次。上面的 event_id 去重擋 Slack 重送，
+  // 這一層擋「使用者手滑連打兩次」以及去重漏網的情況。下游完全沒有保護——
+  // GitHub 的 repository_dispatch 不去重，而 cancel-in-progress 會讓後到的那次
+  // 砍掉前一次進行中的 commit。
+  const trigCache = CacheService.getScriptCache();
+  const trigKey = 'trig_' + pipelineType + '_' + cleanJiraId;
+  if (trigCache.get(trigKey)) {
+    provider.postMessage(
+      conv.channel,
+      `<@${user}> ⏳ ${cleanJiraId} 的 ${pipelineType} 剛剛已經觸發過了。若確定要重跑，請稍待一分鐘。`,
+      conv.thread
+    );
+    return;
+  }
+  trigCache.put(trigKey, '1', 60);
 
   // 1. 發送「任務受理」訊息，取得 thread 錨點
   const acceptMsg = `🚀 收到 <@${user}> 的任務請求，正在啟動 ${pipelineType.toUpperCase()} (\`${cleanJiraId}\`)...`;
