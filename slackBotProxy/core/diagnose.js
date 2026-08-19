@@ -16,14 +16,14 @@ function diagnoseSlackAccess() {
   const props = PropertiesService.getScriptProperties();
 
   console.log('── Script Properties（只列 key，不印值）──');
-  ['SLACK_BOT_TOKEN', 'GITHUB_TOKEN', 'NOTIFY_KEY', 'CHAT_PROVIDER'].forEach(function (k) {
+  ['SLACK_TOKEN', 'GITHUB_TOKEN', 'NOTIFY_KEY', 'CHAT_PROVIDER'].forEach(function (k) {
     const v = props.getProperty(k);
     console.log('  ' + k + ': ' + (v ? '已設定（長度 ' + v.length + '）' : '❌ 未設定'));
   });
 
-  const token = props.getProperty('SLACK_BOT_TOKEN');
+  const token = props.getProperty('SLACK_TOKEN');
   if (!token) {
-    console.log('SLACK_BOT_TOKEN 沒設，後面的檢查沒有意義。');
+    console.log('SLACK_TOKEN 沒設，後面的檢查沒有意義。');
     return;
   }
 
@@ -95,7 +95,7 @@ function diagnoseSlackAccess() {
         console.log('     → provided 就是這把 token 真正擁有的 scope。');
         console.log('       裡面沒有 channels:history 的話：到 Slack App 設定頁按');
         console.log('       "Reinstall to Workspace"，然後把新的 Bot User OAuth Token');
-        console.log('       貼回 Script Properties 的 SLACK_BOT_TOKEN——重新安裝會發新 token。');
+        console.log('       貼回 Script Properties 的 SLACK_TOKEN——重新安裝會發新 token。');
       } else if (body.error === 'not_in_channel') {
         console.log('     → 把 Alice 邀請進這個頻道：/invite @F2E-Alice');
       } else if (body.error === 'channel_not_found') {

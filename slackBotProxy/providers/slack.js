@@ -235,9 +235,9 @@ const SlackProvider = {
   //
   // 需要 channels:history（公開頻道）／groups:history（私人頻道）scope。
   fetchThreadRoot: function (channel, threadTs) {
-    const token = PropertiesService.getScriptProperties().getProperty('SLACK_BOT_TOKEN');
+    const token = PropertiesService.getScriptProperties().getProperty('SLACK_TOKEN');
     if (!token) {
-      console.error('未設定 SLACK_BOT_TOKEN，無法反查 thread 單號');
+      console.error('未設定 SLACK_TOKEN，無法反查 thread 單號');
       return null;
     }
 

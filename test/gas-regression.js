@@ -64,6 +64,18 @@ console.log('[0] GAS 全域 scope — 專案內所有檔案能否共存');
 {
   const vm = require('vm');
   const DECL = /^(?:const|let|var|function)\s+([A-Za-z_$][\w$]*)/gm;
+  // 只抓字面 key；getProperty(SOME_CONST) 這種動態形式靜態檢查不到，跳過
+  const PROP_KEY = /(?:get|set|delete)Property\(\s*'([^']+)'/g;
+  const ALLOWED_PROPS = [
+    'SLACK_TOKEN',        // Slack Bot User OAuth Token（xoxb-）
+    'GITHUB_TOKEN',       // repository_dispatch + 讀 progress.json
+    'NOTIFY_KEY',         // runner → GAS 的共享金鑰
+    'CHAT_PROVIDER',      // slack / googlechat
+    'TEST_WEBHOOK_URL',   // 測試用固定頻道 webhook
+    'last_route_fail',    // 供 diagnoseSlackAccess() 重打的失敗參數
+    'intent_misses'       // 意圖規則未命中的語料
+  ];
+  const badProps = [];
 
   for (const proj of ['slackBotProxy', 'messageDispatch']) {
     const files = [];
@@ -88,8 +100,25 @@ console.log('[0] GAS 全域 scope — 專案內所有檔案能否共存');
     assert.strictEqual(dup.length, 0,
       proj + ' 有重複的頂層宣告（GAS 會拒絕載入）: ' + dup.join(', '));
 
+    // Script Properties 的 key 必須在白名單裡。
+    //
+    // 這一條是實戰換來的：fetchThreadRoot 曾經讀 'SLACK_BOT_TOKEN'，而整個
+    // codebase 其他地方都是 'SLACK_TOKEN'。getProperty 對不存在的 key 回 null
+    // 而不是報錯，所以那段程式碼靜默失敗——症狀是「讀不到 thread 第一則訊息」，
+    // 完全看不出是 key 打錯，還一路誤導到 Slack scope 上去查。
+    //
+    // 新增 property 時要同步更新這份清單，那個摩擦是刻意的。
+    PROP_KEY.lastIndex = 0;
+    while ((m = PROP_KEY.exec(blob)) !== null) {
+      if (ALLOWED_PROPS.indexOf(m[1]) < 0) badProps.push(proj + ' → ' + m[1]);
+    }
+
     ok(proj + '：' + files.length + ' 檔 / ' + Object.keys(seen).length + ' 個頂層宣告，無重複');
   }
+
+  assert.strictEqual(badProps.length, 0,
+    '出現不在白名單的 Script Properties key（是不是打錯了？）：' + badProps.join('、'));
+  ok('Script Properties 的 key 全部在白名單內（' + ALLOWED_PROPS.length + ' 個）');
 }
 
 
