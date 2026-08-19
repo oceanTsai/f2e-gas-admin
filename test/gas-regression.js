@@ -279,7 +279,14 @@ console.log('\n[3] slackBotProxy — thread 反查與 dispatch 安全性');
   // 讀到了但第一則訊息沒有單號
   const noJira = { fetchThreadRoot: function () { return '大家早'; } };
   assert.strictEqual(_resolveRouteFromThread_({ channel:'C1', thread:'8888.8' }, noJira).err, 'no-jira-in-root');
-  ok('反查失敗能區分原因（fetch-failed / no-jira-in-root / 不在 thread）');
+
+  // 失敗參數要被記下來，diagnoseSlackAccess() 才能用同一組重打
+  const rec = JSON.parse(PropertiesService.getScriptProperties().getProperty('last_route_fail'));
+  assert.strictEqual(rec.ch, 'C1');
+  assert.strictEqual(rec.ts, '8888.8');
+  assert.strictEqual(rec.err, 'no-jira-in-root');
+  assert.ok(rec.at, '要有時間戳');
+  ok('反查失敗能區分原因，且記下參數供診斷函式重打');
 
   posted.length = 0; calls.length = 0;
   handleTextAnswer('用 A 方案', IN, 'U1', provider);

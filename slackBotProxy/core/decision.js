@@ -23,6 +23,21 @@ const JIRA_IN_TEXT_RE = /\b([A-Z][A-Z0-9]+-\d+)\b/;
 // 回傳 null＝根本不在 thread 裡（正常情況，不是錯誤）。
 // 回傳 { j: '', err: '<原因>' }＝在 thread 裡但反查不出單號——這種情況要讓使用者
 // 知道原因，最常見的是缺 channels:history scope。
+// 把失敗的參數記下來（覆蓋式，只留最後一筆），讓 diagnoseSlackAccess() 能用
+// 同一組 channel / thread_ts 重打一次 Slack API 並印出完整回應。否則使用者只
+// 看到「讀不到第一則訊息」，無從分辨是 scope 沒生效、token 沒更新，還是 Alice
+// 不在那個頻道——這三種的修法完全不同。
+function _routeFail_(channel, thread, err) {
+  try {
+    PropertiesService.getScriptProperties().setProperty('last_route_fail', JSON.stringify({
+      ch: channel, ts: thread, err: err, at: new Date().toISOString()
+    }));
+  } catch (e) {
+    // 記錄失敗不該影響主流程
+  }
+  return { j: '', err: err };
+}
+
 function _resolveRouteFromThread_(conv, provider) {
   const channel = conv && conv.channel;
   // 只認真正的 thread_ts。舊版把 channel 當 fallback，但拿 channel id 去問
@@ -38,13 +53,13 @@ function _resolveRouteFromThread_(conv, provider) {
   if (!provider || !provider.fetchThreadRoot) return { j: '', err: 'no-provider' };
 
   const rootText = provider.fetchThreadRoot(channel, thread);
-  if (rootText === null) return { j: '', err: 'fetch-failed' };   // API 失敗（scope／token／網路）
-  if (!rootText) return { j: '', err: 'empty-root' };             // 讀到了但沒有文字
+  if (rootText === null) return _routeFail_(channel, thread, 'fetch-failed');  // scope／token／網路
+  if (!rootText) return _routeFail_(channel, thread, 'empty-root');            // 讀到了但沒文字
 
   const m = String(rootText).toUpperCase().match(JIRA_IN_TEXT_RE);
   if (!m) {
     console.log('thread 第一則訊息裡沒有單號：' + String(rootText).slice(0, 120));
-    return { j: '', err: 'no-jira-in-root' };
+    return _routeFail_(channel, thread, 'no-jira-in-root');
   }
 
   cache.put(ck, m[1], ROUTE_CACHE_TTL);
