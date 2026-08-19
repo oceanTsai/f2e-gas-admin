@@ -486,4 +486,66 @@ console.log('[5] messageDispatch — 進度看板渲染 activity');
 }
 
 
+// ══════════════════════════════════════════════════════════════════
+console.log('[6] messageDispatch — Phase 失敗必須看得出來');
+// 實際踩過（VIPOP-46789 / sa-phase2）：Phase 逾時被收掉，但沒有任何腳本把
+// status 寫成 failed，於是看板永遠停在「🔄 執行中」——job 早就紅了，而 Slack
+// 上的人完全看不出來，還在等。修的是 augma 端（set-error 要同時寫 status），
+// 這裡守的是另一半：狀態真的送來 failed 時，看板必須明講發生了什麼。
+// ══════════════════════════════════════════════════════════════════
+{
+  const env = mkEnv({ SLACK_TOKEN: 'xoxb-test' });
+  Object.assign(global, env.globals);
+
+  eval(src(['messageDispatch/providers/slack.js']) + `
+  const captured = [];
+  SlackProvider.updateMessage = function (ch, ts, text, blocks) {
+    captured.push({ text: text, blocks: blocks });
+    return {};
+  };
+
+  function render(phases) {
+    captured.length = 0;
+    SlackProvider.updateProgress({ channel: 'C1', status_ts: '1700.1' }, {
+      jiraId: 'VIPOP-46789', pipeline: 'sa-pipeline',
+      pendingQuestions: 0, runUrl: '', phases: phases
+    });
+    return { header: captured[0].blocks[0].text.text, body: captured[0].blocks[1].text.text };
+  }
+
+  // 重現那次的 payload：failed 但 activity 還留著上一次的內容
+  let out = render([
+    { command: 'sa-phase1', status: 'completed', activity: '', error: '' },
+    { command: 'sa-phase2', status: 'failed',
+      activity: '讀取既有 codebase 實作、分析規格與架構',
+      error: 'Phase 逾時：輪詢達上限 480s 仍未結算，agent 已被收掉' },
+    { command: 'sa-phase3', status: 'pending', activity: '', error: '' }
+  ]);
+
+  assert.ok(out.body.indexOf('❌') >= 0, '失敗要用 ❌ 圖示：' + out.body);
+  assert.ok(out.body.indexOf('逾時') >= 0, '失敗原因要寫在旁邊：' + out.body);
+  assert.ok(out.body.indexOf('🔄') < 0, '失敗的 Phase 不該還是 🔄：' + out.body);
+  assert.ok(out.body.indexOf('分析規格與架構') < 0,
+    'failed 不該再顯示殘留的 activity（那會讓人以為還在跑）：' + out.body);
+  assert.ok(out.header.indexOf('已中止') >= 0,
+    '標題要明講 pipeline 已中止，只靠圖示太容易被當成還在跑：' + out.header);
+  assert.ok(out.header.indexOf('sa-phase2') >= 0, '標題要指出是哪一階失敗：' + out.header);
+
+  // 沒有 error 時也不能空著
+  out = render([{ command: 'sa-phase2', status: 'failed', activity: '', error: '' }]);
+  assert.ok(out.body.indexOf('失敗') >= 0, '沒有 error 要退回「失敗」：' + out.body);
+
+  // 過長的 error 要截斷
+  out = render([{ command: 'sa-phase2', status: 'failed', activity: '', error: 'X'.repeat(200) }]);
+  assert.ok(out.body.length < 260, '過長的 error 應截斷，實際 ' + out.body.length);
+
+  // 全部順利時不該出現「已中止」
+  out = render([{ command: 'sa-phase1', status: 'completed', activity: '', error: '' }]);
+  assert.ok(out.header.indexOf('已中止') < 0, '沒有失敗時不該標中止：' + out.header);
+
+  ok('failed 顯示 ❌ 與原因、不殘留 activity、標題明講已中止、無失敗時不誤標');
+  `);
+}
+
+
 console.log('\n✅ ' + passed + ' 項全部通過\n');

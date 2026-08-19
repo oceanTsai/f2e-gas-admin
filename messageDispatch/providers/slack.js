@@ -40,6 +40,12 @@ const SlackProvider = {
                    : '　_執行中…_';
       } else if (p.status === 'awaiting_decision') {
         tail = '　_等待決策_';
+      } else if (p.status === 'failed') {
+        // 失敗原因直接寫在旁邊。少了這一行，人只看到一個 ❌ 就得去翻 Actions
+        // log 才知道是逾時、agent 掛掉、還是產物沒寫出來。
+        const err = String(p.error || '').trim();
+        tail = err ? ('　_' + (err.length > 48 ? err.slice(0, 47) + '…' : err) + '_')
+                   : '　_失敗_';
       }
       return icon + ' `' + p.command + '`' + tail;
     });
@@ -48,6 +54,14 @@ const SlackProvider = {
     const total = (info.phases || []).length;
 
     let header = '🚀 *' + info.jiraId + '*　`' + info.pipeline + '`　(' + done + '/' + total + ')';
+
+    // 有 Phase 失敗時 pipeline 已經停了，後面的階段永遠不會跑。只靠一個 ❌ 圖示
+    // 太容易被當成「還在跑」——標題明講，人才知道要處理而不是繼續等。
+    const failed = (info.phases || []).filter(function (p) { return p.status === 'failed'; });
+    if (failed.length > 0) {
+      header += '　❌ *已中止*（`' + failed[0].command + '`）';
+    }
+
     if (info.pendingQuestions > 0) {
       header += '\n🟡 有 *' + info.pendingQuestions + '* 題待決議，請看本 thread 內的決策卡片';
     }
