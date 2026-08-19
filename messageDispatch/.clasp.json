@@ -1,0 +1,16 @@
+{
+  "scriptId": "1M1L503EENJPIfL3pC8eMp2coKrikAkzeuj-Odm_NQ6BpXu4t2v4NWhwT",
+  "rootDir": "messageDispatch",
+  "scriptExtensions": [
+    ".js",
+    ".gs"
+  ],
+  "htmlExtensions": [
+    ".html"
+  ],
+  "jsonExtensions": [
+    ".json"
+  ],
+  "filePushOrder": [],
+  "skipSubdirectories": false
+}
