@@ -45,6 +45,7 @@ f2e-gas-admin/
 | 資料夾 | 用途 | 備註 |
 |---|---|---|
 | `slackBotProxy` | Slack Event Subscription 接收與 app_mention 路由 | GAS Web App，對外 `/exec` |
+| `googleDriveHtmlPreviewer` | 將雲端硬碟 RA 資料夾底下的 HTML 檔直接渲染成網頁 | GAS Web App，`?p=` 帶相對路徑；限 104 網域 |
 | _（待補）_ | | |
 
 ---
