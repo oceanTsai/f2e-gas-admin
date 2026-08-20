@@ -370,9 +370,14 @@ function handleInteraction(payload, provider, key) {
 //  從來沒有顯示過它——人不知道 AI 幫他假設了什麼。這裡一併列出來。
 // ═══════════════════════════════════════════════════════════════════
 
+// ⚠️ 這份對照只影響**顯示**：查不到 key 時 handleStatusQuery 會退回原樣印出
+// phase 名稱（見下方 `PHASE_LABEL[k] || k`），所以漏一個不會壞，只是看板上會
+// 出現 `ra-phase3` 這種原始字串。augma 那側新增 Phase 時記得補進來。
 const PHASE_LABEL = {
   'ra-phase1': 'RA① 資料抓取',
-  'ra-phase2': 'RA② 規格分析',
+  'ra-phase2': 'RA② Codebase 現況研讀',
+  'ra-phase3': 'RA③ 規格與補問清單',
+  'ra-phase4': 'RA④ PO 友善 HTML',
   'sa-phase1': 'SA① 範疇判讀',
   'sa-phase2': 'SA② Codebase 分析',
   'sa-phase3': 'SA③ SA 文件',
