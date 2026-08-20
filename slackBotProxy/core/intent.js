@@ -150,7 +150,9 @@ function routeByIntent(text, conv, userId, provider) {
       // 只在 no-match 時給。其餘的 unknown 都有更具體的下一步：
       //   jira-no-verb / verb-no-jira → 反問缺的那一半，補上就能跑對的流程
       //   route-failed                → 那是缺 scope，丟給 agent 也解決不了
-      const offerAsk = (intent.matchedBy === 'no-match');
+      // 還要通過通關密語：測試期間沒有密語的人按了也會被擋，
+      // 附一顆按不動的按鈕只會讓人以為壞了。
+      const offerAsk = (intent.matchedBy === 'no-match') && _askAllowed_(text);
       const blocks = offerAsk ? _askOfferBlocks_(text, conv, userId) : null;
       provider.postMessage(conv.channel, _intentHelpText_(userId, intent), conv.thread, blocks);
     }

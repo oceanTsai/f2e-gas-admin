@@ -88,7 +88,9 @@ console.log('[0] GAS 全域 scope — 專案內所有檔案能否共存');
     'TEST_WEBHOOK_URL',   // 測試用固定頻道 webhook
     'last_route_fail',    // 供 diagnoseSlackAccess() 重打的失敗參數
     'intent_misses',      // 意圖規則未命中的語料
-    'INTENT_CLASSIFIER'   // rules / llm（與 ANSWER_PARSER 分開，曝光面不同）
+    'INTENT_CLASSIFIER',  // rules / llm（與 ANSWER_PARSER 分開，曝光面不同）
+    'ASK_PASSPHRASE',     // 自由提問的通關密語；設成 off 才是關閉閘門
+    'ASK_OWNER'           // 被擋下時要找誰拿密語
   ];
   const badProps = [];
 
@@ -767,15 +769,17 @@ console.log('\n[3e] slackBotProxy — 自由提問（ask）');
   ok('空提問 → 給用法，不 dispatch');
 
   posted.length = 0; dispatched.length = 0;
-  handleAskRequest('X'.repeat(2500), CH, 'U1', provider);
+  handleAskRequest('速速前 ' + 'X'.repeat(2500), CH, 'U1', provider);
   assert.strictEqual(dispatched.length, 0);
   assert.ok(posted.some(t => t.indexOf('太長') >= 0));
   ok('超長提問 → 擋下（多半是貼錯整份 log，讓 agent 讀八分鐘沒有意義）');
 
   posted.length = 0; dispatched.length = 0;
-  handleAskRequest('幫我查 ui 的 code 裡登入流程怎麼寫的', CH, 'U1', provider);
+  handleAskRequest('速速前 幫我查 ui 的 code 裡登入流程怎麼寫的', CH, 'U1', provider);
   assert.strictEqual(dispatched.length, 1);
   assert.ok(dispatched[0].prompt.indexOf('登入流程') >= 0);
+  assert.ok(dispatched[0].prompt.indexOf('速速前') < 0,
+    '密語要在送出前拿掉——agent 收到它只會困惑，甚至拿去查');
   assert.ok(posted.some(t => t.indexOf('正在查') >= 0));
   ok('正常提問 → 先貼受理訊息取得 thread 錨點，再 dispatch');
 
@@ -786,14 +790,14 @@ console.log('\n[3e] slackBotProxy — 自由提問（ask）');
   ok('conversation 錨點在 dispatch 前定案（答案回得來、且不洗頻）');
 
   posted.length = 0; dispatched.length = 0;
-  handleAskRequest('再問一題', CH, 'U1', provider);
+  handleAskRequest('速速前 再問一題', CH, 'U1', provider);
   assert.strictEqual(dispatched.length, 0);
   assert.ok(posted.some(t => t.indexOf('剛剛才問過') >= 0));
   ok('同一人 60 秒內再問 → 節流（每題佔一台 runner）');
 
   // 節流是 per-user：別人不該被連坐
   posted.length = 0; dispatched.length = 0;
-  handleAskRequest('我也想問', CH, 'U2', provider);
+  handleAskRequest('速速前 我也想問', CH, 'U2', provider);
   assert.strictEqual(dispatched.length, 1);
   ok('節流是 per-user，不會連坐其他人');
 
@@ -801,15 +805,65 @@ console.log('\n[3e] slackBotProxy — 自由提問（ask）');
   CacheService.getScriptCache().remove('ask_U3');
   dispatchOk = false;
   posted.length = 0; dispatched.length = 0;
-  handleAskRequest('會失敗的一題', CH, 'U3', provider);
+  handleAskRequest('速速前 會失敗的一題', CH, 'U3', provider);
   assert.ok(posted.some(t => t.indexOf('觸發 GitHub Actions 失敗') >= 0));
   assert.strictEqual(CacheService.getScriptCache().get('ask_U3'), null,
     'dispatch 失敗不該寫節流標記，否則他連重試都被擋住');
   dispatchOk = true;
   posted.length = 0; dispatched.length = 0;
-  handleAskRequest('重試', CH, 'U3', provider);
+  handleAskRequest('速速前 重試', CH, 'U3', provider);
   assert.strictEqual(dispatched.length, 1);
   ok('dispatch 失敗 → 不寫節流標記，可立刻重試');
+
+  // ── 通關密語（測試期間的閘門）──────────────────────────────
+  // 每觸發一次就佔一台 runner，而整台機器只有 3 個
+  CacheService.getScriptCache().remove('ask_U9');
+  posted.length = 0; dispatched.length = 0;
+  handleAskRequest('幫我查 ui 的 code', CH, 'U9', provider);
+  assert.strictEqual(dispatched.length, 0, '沒有密語就不該送出');
+  assert.ok(posted.some(t => t.indexOf('測試中') >= 0));
+  assert.ok(posted.every(t => t.indexOf('速速前') < 0),
+    '擋下的訊息不可以洩漏密語本身——洩漏了就等於沒有閘門');
+  // ASK_OWNER 沒設時不可以生出 <@某個名字>：Slack 只認 user id，
+  // 名字會渲染成壞掉的 mention，看起來像 bug 而不是提示
+  assert.ok(posted.some(t => t.indexOf('找專案負責人拿') >= 0));
+  PropertiesService.getScriptProperties().setProperty('ASK_OWNER', 'U0PEDRO');
+  posted.length = 0;
+  handleAskRequest('幫我查 X', CH, 'U9', provider);
+  assert.ok(posted.some(t => t.indexOf('<@U0PEDRO>') >= 0));
+  PropertiesService.getScriptProperties().deleteProperty('ASK_OWNER');
+  ok('沒有密語 → 擋下、不洩漏密語，且沒設 ASK_OWNER 時不生出壞掉的 mention');
+
+  // 只打密語沒有問題本文
+  posted.length = 0; dispatched.length = 0;
+  handleAskRequest('速速前', CH, 'U9', provider);
+  assert.strictEqual(dispatched.length, 0);
+  assert.ok(posted.some(t => t.indexOf('還沒說要問什麼') >= 0));
+  ok('只打密語沒有問題 → 提示他補上（而不是送一個空問題）');
+
+  // 密語可以出現在句子任何位置
+  CacheService.getScriptCache().remove('ask_U9');
+  posted.length = 0; dispatched.length = 0;
+  handleAskRequest('幫我查 ui 的 code 速速前', CH, 'U9', provider);
+  assert.strictEqual(dispatched.length, 1);
+  assert.strictEqual(dispatched[0].prompt, '幫我查 ui 的 code');
+  ok('密語在句尾也算，且送出前被剝掉');
+
+  // 預設開啟：忘記設定時應該是「沒人能用」而不是「所有人都能用」
+  PropertiesService.getScriptProperties().deleteProperty('ASK_PASSPHRASE');
+  assert.strictEqual(_askAllowed_('沒有密語'), false, '未設定屬性時閘門必須是開著的');
+  // 空字串不算關閉——「不小心清空」與「刻意關閉」看起來會一模一樣
+  PropertiesService.getScriptProperties().setProperty('ASK_PASSPHRASE', '   ');
+  assert.strictEqual(_askAllowed_('沒有密語'), false, '留空不算關閉');
+  // 要關必須明確寫 off
+  PropertiesService.getScriptProperties().setProperty('ASK_PASSPHRASE', 'off');
+  assert.strictEqual(_askAllowed_('沒有密語'), true);
+  // 也可以換一個密語
+  PropertiesService.getScriptProperties().setProperty('ASK_PASSPHRASE', '芝麻開門');
+  assert.strictEqual(_askAllowed_('芝麻開門 查一下'), true);
+  assert.strictEqual(_askAllowed_('速速前 查一下'), false, '換了密語之後舊的就該失效');
+  PropertiesService.getScriptProperties().deleteProperty('ASK_PASSPHRASE');
+  ok('閘門預設開啟、留空不算關閉、要關必須明確寫 off、密語可替換');
 
   // ask 與意圖分類是兩條獨立的路：意圖層掛掉時 ask 還能用
   assert.strictEqual(classifyIntent('幫我查ui的code', { channel:'C9', thread:null }, provider).matchedBy, 'no-match');
@@ -851,13 +905,19 @@ console.log('\n[3f] slackBotProxy — 反問時的「當成一般提問送出」
 
   // 真的沒聽懂 → 給按鈕
   posted.length = 0;
-  routeByIntent('幫我查ui的code', OUT, 'U1', provider);
+  routeByIntent('速速前 幫我查ui的code', OUT, 'U1', provider);
   const btn = findBtn();
-  assert.ok(btn, 'no-match 時要附上按鈕');
+  assert.ok(btn, 'no-match ＋ 有密語時要附上按鈕');
   assert.strictEqual(btn.kind, 'ask_confirm');
   assert.ok(btn.k && btn.k.indexOf('askq_') === 0, 'value 只放快取鍵');
   assert.ok(JSON.stringify(btn).length < 2000, 'Slack 按鈕 value 上限 2000 字元');
-  ok('no-match → 反問訊息附「當成一般提問送出」按鈕（value 只放快取鍵）');
+  ok('no-match ＋ 有密語 → 附「當成一般提問送出」按鈕（value 只放快取鍵）');
+
+  // 沒有密語就不附按鈕：附一顆按下去會被擋的按鈕，只會讓人以為壞了
+  posted.length = 0;
+  routeByIntent('幫我查ui的code', OUT, 'U1', provider);
+  assert.strictEqual(findBtn(), null, '沒有密語時不該附按鈕');
+  ok('沒有密語 → 連按鈕都不附（不給按不動的東西）');
 
   // 有更具體下一步的 unknown 不給按鈕：補上缺的那半就能跑對的流程，
   // 丟給通用 agent 只會得到一個比較差的答案
@@ -871,13 +931,13 @@ console.log('\n[3f] slackBotProxy — 反問時的「當成一般提問送出」
 
   // 按下去 → 走與 @Alice ask 完全相同的入口
   posted.length = 0; dispatched.length = 0;
-  routeByIntent('幫我查ui的code', OUT, 'U2', provider);
+  routeByIntent('速速前 幫我查ui的code', OUT, 'U2', provider);
   const btn2 = findBtn();
   const click = { kind:'ask_confirm', askKey: btn2.k, userId:'U2', user:'<@U2>',
                   conversation:{ provider:'slack', channel:'C9', thread:null } };
   handleInteraction(click, provider, null);
   assert.strictEqual(dispatched.length, 1);
-  assert.strictEqual(dispatched[0], '幫我查ui的code', '要送出原句，不是按鈕的文字');
+  assert.strictEqual(dispatched[0], '幫我查ui的code', '要送出原句（去掉密語），不是按鈕的文字');
   ok('按下按鈕 → 用原句走 handleAskRequest（與 @Alice ask 同一條路）');
 
   // 連點兩下不該送兩次——那是再燒一台 runner
