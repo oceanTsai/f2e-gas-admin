@@ -6,6 +6,10 @@
 
 const AUGMA_GITHUB_REPO = '104corp/104.vip.f2e.augma';
 const JIRA_KEY_PATTERN = /^[A-Z][A-Z0-9]+-[0-9]+$/;
+// 提問編號＝分支名 ask/<id> 的後半段，由 ask-workflow 的 Resolve ask id 產生：
+// <sanitized-slack-uid>-YYYYMMDD-HHMMSS。這條樣式在 ask-workflow.yml 的
+// Validate input 有一份**必須同步**的副本（那邊不能相信呼叫端送什麼）。
+const ASK_ID_PATTERN = /^[A-Za-z0-9]+-[0-9]{8}-[0-9]{6}$/;
 
 function dispatchPipeline(pipelineType, jiraId, conversation) {
   const cleanJiraId = jiraId.trim().toUpperCase();
@@ -71,19 +75,36 @@ function dispatchResumeBatch(jiraId, pipeline, rawText, user) {
 //
 // conversation 必須在這裡就定案：答案是幾分鐘後由 augma 主動貼回來的，
 // 那時已經沒有任何 Slack 事件可以推導出「要回到哪裡」。
-function dispatchAsk(prompt, userId, conversation) {
-  const payload = {
-    event_type: 'ask',
-    client_payload: {
-      prompt: prompt,
-      // 只用來組分支名（ask/<uid>-<timestamp>），所以送 id 而不是顯示名——
-      // 顯示名可能含點或中文，那些在 git ref 裡是雷。
-      user_id: String(userId || 'unknown').replace(/[^A-Za-z0-9]/g, ''),
-      conversation: conversation
-    }
+//
+// askId 是**續問**：同一個 Slack thread 的追問要回到同一支 ask/<id> 分支，
+// 上一輪的問答才看得到（augma 的 ask-new-turn.sh 負責歸檔與重設）。
+// 空字串／未傳＝開新的一輪，這個欄位就不放進 payload。
+//
+// ⚠️ 不放空字串是刻意的：ask-workflow 的 concurrency 分組鍵寫成
+//    `client_payload.ask_id || client_payload.user_id`，而 GitHub 表達式的
+//    `||` 對空字串會取右邊——放空字串其實也能運作，但 workflow 那邊的
+//    `if [ -n "$ASK_CONTINUE_ID" ]` 與這裡「有沒有這個欄位」對不上，
+//    日後改任一邊都要重新推一次那條真值表。乾脆讓「沒有」就是不存在。
+function dispatchAsk(prompt, userId, conversation, askId) {
+  const clean = {
+    prompt: prompt,
+    // 只用來組分支名（ask/<uid>-<timestamp>），所以送 id 而不是顯示名——
+    // 顯示名可能含點或中文，那些在 git ref 裡是雷。
+    user_id: String(userId || 'unknown').replace(/[^A-Za-z0-9]/g, ''),
+    conversation: conversation
   };
 
-  return dispatchWorkflow(payload);
+  // 樣式在這裡先驗一次。workflow 那邊會再驗同一條（它不能相信呼叫端），
+  // 但擋在這裡的好處是：對不上就當新的一輪，人拿得到答案；送過去才被打回來
+  // 的話 Actions log 會多一則沒人會看到的 warning。
+  const id = String(askId || '').trim();
+  if (id && ASK_ID_PATTERN.test(id)) {
+    clean.ask_id = id;
+  } else if (id) {
+    console.warn('dispatchAsk: ask_id 樣式不符，改為開新的一輪：' + id);
+  }
+
+  return dispatchWorkflow({ event_type: 'ask', client_payload: clean });
 }
 
 function dispatchWorkflow(payload) {

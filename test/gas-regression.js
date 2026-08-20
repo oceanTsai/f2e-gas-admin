@@ -755,8 +755,8 @@ console.log('\n[3e] slackBotProxy — 自由提問（ask）');
   };
 
   eval(src(INTENT_SRC) + `
-  dispatchAsk = function (prompt, uid, conv) {
-    dispatched.push({ prompt: prompt, uid: uid, conv: conv });
+  dispatchAsk = function (prompt, uid, conv, askId) {
+    dispatched.push({ prompt: prompt, uid: uid, conv: conv, askId: askId });
     return dispatchOk;
   };
 
@@ -868,6 +868,200 @@ console.log('\n[3e] slackBotProxy — 自由提問（ask）');
   // ask 與意圖分類是兩條獨立的路：意圖層掛掉時 ask 還能用
   assert.strictEqual(classifyIntent('幫我查ui的code', { channel:'C9', thread:null }, provider).matchedBy, 'no-match');
   ok('同一句話在意圖層仍是 no-match —— ask 刻意不是 catch-all');
+  `);
+}
+
+
+// ══════════════════════════════════════════════════════════════════
+console.log('\n[3e-2] slackBotProxy — 續問接續同一支 ask 分支');
+// 實戰換來的：在 ask 的 thread 底下說「再試一次」，以前每次都開一支新分支、
+// 全新的空白工作區，於是 agent 只能反問「我看不到這句話是回覆給哪一則訊息」。
+// 修法是從 thread 第一則訊息（會被 notify-progress 更新成帶提問編號的看板）
+// 反查編號，讓 augma 沿用同一支分支。
+//
+// 同一個反查也決定了密語豁免：受理過的 thread 內追問不再要密語（串文裡每一句
+// 都打「速速前 再試一次」體感太差），所以兩者放在同一節一起驗。
+// ══════════════════════════════════════════════════════════════════
+{
+  const env = mkEnv();
+  Object.assign(global, env.globals);
+  const posted = [], dispatched = [];
+  let rootText = '';
+  let rootCalls = 0;
+  const provider = {
+    name: 'slack',
+    fetchThreadRoot: () => { rootCalls++; return rootText; },
+    postMessage: (ch, text) => { posted.push(text); return { ts: '1700.9' }; },
+    postAccepted: (conv, text) => {
+      posted.push(text);
+      return { provider:'slack', channel: conv.channel, thread: conv.thread || '1700.9', status_ts: '1700.9' };
+    },
+  };
+
+  eval(src(INTENT_SRC) + `
+  dispatchAsk = function (prompt, uid, conv, askId) {
+    dispatched.push({ prompt: prompt, askId: askId });
+    return true;
+  };
+  const reset = function () { posted.length = 0; dispatched.length = 0; rootCalls = 0; };
+  const IN_THREAD  = { provider:'slack', channel:'C1', thread:'1700.1' };
+  // 進度看板的真實形狀（messageDispatch 的 updateProgress 組的）
+  const BOARD = '\u{1F680} *U0BP6PJQGKB-20260820-132620*\u3000\`ask\`\u3000(1/1)';
+
+  // ── 串文追問 → 帶上第一輪的編號 ────────────────────────────────
+  rootText = BOARD;
+  reset();
+  handleAskRequest('速速前 再試一次', IN_THREAD, 'U1', provider);
+  assert.strictEqual(dispatched.length, 1);
+  assert.strictEqual(dispatched[0].askId, 'U0BP6PJQGKB-20260820-132620',
+    '續問必須沿用第一輪的提問編號，否則會開新分支、看不到上文');
+  assert.ok(posted.some(t => t.indexOf('追問') >= 0 && t.indexOf('上文') >= 0),
+    '受理訊息要講明這是續問——反查失敗時他要能立刻看出來，而不是等幾分鐘後收到答非所問');
+  ok('ask thread 內追問 → 反查出第一輪編號並帶進 dispatch');
+
+  // ── 反查結果要快取：同一個 thread 不該每次都打一次 Slack API ────
+  CacheService.getScriptCache().remove('ask_U2');
+  reset();
+  handleAskRequest('速速前 那第二點再展開一下', IN_THREAD, 'U2', provider);
+  assert.strictEqual(rootCalls, 0, '同一個 thread 的第二次追問應命中快取，不再打 API');
+  assert.strictEqual(dispatched[0].askId, 'U0BP6PJQGKB-20260820-132620');
+  ok('反查命中後快取，同 thread 後續追問不再打 Slack API');
+
+  // ── 在頻道裡直接問 → 沒有 thread，連 API 都不該打 ──────────────
+  CacheService.getScriptCache().remove('ask_U3');
+  reset();
+  handleAskRequest('速速前 幫我查登入流程', { provider:'slack', channel:'C1', thread:null }, 'U3', provider);
+  assert.strictEqual(rootCalls, 0, '不在 thread 裡就不必反查');
+  assert.strictEqual(dispatched[0].askId, '', '沒有上文＝開新的一輪');
+  ok('頻道內直接提問 → 不反查、開新的一輪');
+
+  // ── 非 ask 的 thread（RA 看板）→ 不可誤認 ───────────────────────
+  // 這是最重要的一條：認錯的話追問會被寫到別人的 ask 分支上。
+  CacheService.getScriptCache().remove('ask_U4');
+  reset();
+  rootText = '\u{1F680} *VIPOP-46703*\u3000\`ra-pipeline\`\u3000(2/4)';
+  handleAskRequest('速速前 這張單的登入流程在哪', { provider:'slack', channel:'C1', thread:'1700.2' }, 'U4', provider);
+  assert.strictEqual(dispatched[0].askId, '', 'JIRA 單號不可被當成提問編號');
+  ok('RA/SA 的 thread → 不誤認成 ask 續問（單號樣式與提問編號無交集）');
+
+  // ── 反查失敗（缺 scope／讀不到）→ 降級成新的一輪，不可擋下提問 ──
+  CacheService.getScriptCache().remove('ask_U5');
+  reset();
+  rootText = null;
+  handleAskRequest('速速前 再試一次', { provider:'slack', channel:'C1', thread:'1700.3' }, 'U5', provider);
+  assert.strictEqual(dispatched.length, 1, '反查失敗絕不能擋下提問——沒有上文的答案仍然有用');
+  assert.strictEqual(dispatched[0].askId, '');
+  ok('反查失敗 → 降級開新的一輪，提問仍然送出');
+
+  // ── miss 不可以被快取 ──────────────────────────────────────────
+  // 第一輪的 thread root 此刻可能還是「正在查…」（看板還沒推上來）。
+  // 快取了那次的 miss，這個 thread 從此再也接不起來。
+  CacheService.getScriptCache().remove('ask_U6');
+  reset();
+  rootText = '\u{1F50D} 收到 <@U6> 的提問，正在查…';
+  handleAskRequest('速速前 第一題', { provider:'slack', channel:'C1', thread:'1700.4' }, 'U6', provider);
+  assert.strictEqual(dispatched[0].askId, '');
+  CacheService.getScriptCache().remove('ask_U6');
+  reset();
+  rootText = BOARD;   // 看板推上來了
+  handleAskRequest('速速前 追問', { provider:'slack', channel:'C1', thread:'1700.4' }, 'U6', provider);
+  assert.strictEqual(dispatched[0].askId, 'U0BP6PJQGKB-20260820-132620',
+    'miss 不可被快取，否則看板推上來之後這個 thread 永遠接不起來');
+  ok('反查 miss 不寫快取（看板還沒推上來時不該把 thread 判死）');
+
+  // ── 一串只要一次密語 ────────────────────────────────────────────
+  // 體感換來的：串文裡每一句都要打「速速前 再試一次」很荒謬，而那正是最自然
+  // 的追問情境。已經受理過的 thread 就當作整串放行——第一句仍然要密語，
+  // 而能打出那一句的人本來就有。
+  CacheService.getScriptCache().remove('ask_U7');
+  reset();
+  rootText = BOARD;
+  handleAskRequest('再試一次', { provider:'slack', channel:'C1', thread:'1700.7' }, 'U7', provider);
+  assert.strictEqual(dispatched.length, 1, '受理過的 thread 內追問不該再要密語');
+  assert.strictEqual(dispatched[0].prompt, '再試一次');
+  assert.strictEqual(dispatched[0].askId, 'U0BP6PJQGKB-20260820-132620');
+  assert.strictEqual(rootCalls, 1, '豁免與續問共用同一次反查，不該打兩次 API');
+  ok('ask thread 內追問 → 免密語（且只反查一次）');
+
+  // 豁免的來源是「這串受理過」，不是「在 thread 裡」——RA 看板底下不算
+  CacheService.getScriptCache().remove('ask_U8');
+  reset();
+  rootText = '\u{1F680} *VIPOP-46703*\u3000\`ra-pipeline\`\u3000(2/4)';
+  handleAskRequest('幫我查登入流程', { provider:'slack', channel:'C1', thread:'1700.8' }, 'U8', provider);
+  assert.strictEqual(dispatched.length, 0, 'RA thread 不是 ask thread，沒有豁免');
+  assert.ok(posted.some(t => t.indexOf('測試中') >= 0));
+  ok('非 ask 的 thread → 沒有豁免，仍然要密語');
+
+  // 頻道裡直接問永遠沒有豁免（連反查都不必打）
+  CacheService.getScriptCache().remove('ask_U8');
+  reset();
+  rootText = BOARD;
+  handleAskRequest('幫我查登入流程', { provider:'slack', channel:'C1', thread:null }, 'U8', provider);
+  assert.strictEqual(dispatched.length, 0, '頻道裡的第一句一定要密語');
+  assert.strictEqual(rootCalls, 0);
+  ok('頻道內直接提問 → 一定要密語（豁免只在串文內成立）');
+
+  // 反問按鈕的判斷要跟著同一條規則：這裡說不行而 handleAskRequest 其實會受理，
+  // 等於在最需要那顆按鈕的地方（追問只打了「再試一次」）反而不附
+  rootText = BOARD;
+  assert.strictEqual(_askAllowed_('再試一次'), false, '不給 conv 就只看密語');
+  assert.strictEqual(
+    _askAllowed_('再試一次', { provider:'slack', channel:'C1', thread:'1700.7' }, provider), true);
+  assert.strictEqual(
+    _askAllowed_('再試一次', { provider:'slack', channel:'C1', thread:null }, provider), false);
+  ok('_askAllowed_ 與 handleAskRequest 同一條豁免規則（按鈕不會該附時不附）');
+  `);
+}
+
+
+// ══════════════════════════════════════════════════════════════════
+console.log('\n[3e-3] github.js — dispatchAsk 的 ask_id 契約');
+// ask-workflow.yml 的 Validate input 有一份同樣的樣式檢查。兩邊都要驗：
+// 這邊擋下就降級成新的一輪（人拿得到答案），那邊是因為不能相信呼叫端。
+// ══════════════════════════════════════════════════════════════════
+{
+  const env = mkEnv();
+  Object.assign(global, env.globals);
+  const sent = [];
+  env.props.set('GITHUB_TOKEN', 'gh-token');
+  global.UrlFetchApp = { fetch: (url, opt) => {
+    sent.push(JSON.parse(opt.payload));
+    return { getResponseCode: () => 204, getContentText: () => '' };
+  }};
+
+  eval(src(['slackBotProxy/core/github.js']) + `
+  const CONV = { provider:'slack', channel:'C1', thread:'1.1' };
+
+  sent.length = 0;
+  dispatchAsk('查一下', 'U1', CONV, 'U1-20260820-132620');
+  assert.strictEqual(sent[0].client_payload.ask_id, 'U1-20260820-132620');
+  ok('合法的 ask_id → 放進 client_payload');
+
+  // 沒有續問時**不放這個欄位**（不是放空字串）：ask-workflow 那邊用
+  // \`[ -n "$ASK_CONTINUE_ID" ]\` 判斷，兩邊的真值表要一致才不會日後對不上
+  sent.length = 0;
+  dispatchAsk('查一下', 'U1', CONV, '');
+  assert.ok(!('ask_id' in sent[0].client_payload), '沒有續問就不該有 ask_id 欄位');
+  sent.length = 0;
+  dispatchAsk('查一下', 'U1', CONV);
+  assert.ok(!('ask_id' in sent[0].client_payload), '未傳參數時同理');
+  ok('無續問 → 不放 ask_id 欄位（不是放空字串）');
+
+  // 樣式不符一律降級。ask_id 會直接變成 git 分支名，這是安全邊界。
+  sent.length = 0;
+  dispatchAsk('查一下', 'U1', CONV, '../../etc/passwd');
+  assert.ok(!('ask_id' in sent[0].client_payload), '非法字元不可進 payload——它會變成分支名');
+  sent.length = 0;
+  dispatchAsk('查一下', 'U1', CONV, 'VIPOP-46703');
+  assert.ok(!('ask_id' in sent[0].client_payload), 'JIRA 單號不是提問編號');
+  ok('樣式不符 → 降級成新的一輪（ask_id 會變成分支名，這是安全邊界）');
+
+  // client_payload 的 top-level 屬性上限是 10 個
+  sent.length = 0;
+  dispatchAsk('查一下', 'U1', CONV, 'U1-20260820-132620');
+  assert.ok(Object.keys(sent[0].client_payload).length <= 10,
+    'client_payload top-level 屬性上限 10 個，實際 ' + Object.keys(sent[0].client_payload).length);
+  ok('client_payload 屬性數仍在 GitHub 的 10 個上限內');
   `);
 }
 

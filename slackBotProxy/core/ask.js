@@ -38,6 +38,14 @@ const ASK_THROTTLE_SEC = 60;
 //
 //  密語會在送出前從問題裡拿掉：agent 收到 `速速前 幫我查 ui 的 code` 只會
 //  困惑那三個字是什麼意思，甚至可能拿去查。
+//
+//  ⚠️ **一串只要一次。** 這個 thread 先前已經受理過一次 ask，之後的追問就不再
+//     要密語。實戰體感換來的：串文裡每一句都要打「速速前 再試一次」很荒謬，
+//     而那是最自然的追問情境。
+//
+//     閘門沒有因此變鬆——開出這一串的第一句仍然要密語，而能打出那一句的人
+//     本來就有密語。拿到豁免的是**這個 thread**、不是某個人：別人順著同一串
+//     追問是刻意允許的，那本來就是同一段對話（而且仍然吃同一份節流與長度上限）。
 // ═══════════════════════════════════════════════════════════════════
 
 const ASK_PASSPHRASE_DEFAULT = '速速前';
@@ -62,9 +70,66 @@ function _checkAskPassphrase_(prompt) {
   return { ok: true, prompt: stripped };
 }
 
-/** 反問訊息要不要附上「當成一般提問送出」按鈕——沒有密語就不附，附了也按不動。 */
-function _askAllowed_(rawText) {
-  return _checkAskPassphrase_(String(rawText || '')).ok;
+/**
+ * 反問訊息要不要附上「當成一般提問送出」按鈕——沒有密語就不附，附了也按不動。
+ *
+ * conv / provider 是選用的：給了就套用與 handleAskRequest 同一條豁免規則
+ * （這串受理過就不再要密語），否則只看密語。兩邊的答案必須一致——這裡說不行
+ * 而那邊其實會受理，等於把一個能用的能力藏起來。
+ */
+function _askAllowed_(rawText, conv, provider) {
+  if (_checkAskPassphrase_(String(rawText || '')).ok) return true;
+  return !!(conv && provider && _resolveAskIdFromThread_(conv, provider));
+}
+
+
+// ═══════════════════════════════════════════════════════════════════
+//  續問：同一個 thread 的追問要回到同一支 ask/<id> 分支
+//
+//  問題：一次提問一支分支（ask/<uid>-<timestamp>）是最省事的併發模型，但它
+//  讓每一次追問都在**全新的空白工作區**裡開始。人在 thread 底下說「再試一次」
+//  「那第二點再展開一下」時，agent 看到的只有那五個字，沒有上文——只能反問
+//  「你要我重試什麼」。實際踩到過。
+//
+//  解法：不引入任何共享儲存，沿用 decision.js 那個「thread 的第一則訊息就是
+//  路由資訊」的作法。ask 的受理訊息會被 notify-progress.sh 就地 chat.update
+//  成進度看板，而看板標題帶著提問編號（`🚀 *U1-20260820-132620* \`ask\` (1/1)`）。
+//  反查它即可，GAS 這側依舊零狀態。
+//
+//  ⚠️ 反查失敗一律回空字串＝開新的一輪，**絕不因此擋下提問**。
+//     沒有上文的答案仍然有用；擋下來他就什麼都沒有。
+//
+//  ⚠️ 只快取命中的結果。第一輪的 thread root 此刻可能還是「正在查…」（看板
+//     還沒推上來），快取了那次的 miss 會讓這個 thread 從此再也接不起來。
+// ═══════════════════════════════════════════════════════════════════
+
+// 樣式要夠緊，否則會把別的 thread 認成 ask thread。JIRA 單號（VIPOP-46703）
+// 與這條無交集：這裡要求 `-8位數-6位數` 兩段。
+const ASK_ID_IN_TEXT_RE = /([A-Za-z0-9]+-[0-9]{8}-[0-9]{6})/;
+const ASK_ROUTE_CACHE_TTL = 21600;   // 6 小時，CacheService 上限
+
+function _resolveAskIdFromThread_(conv, provider) {
+  const channel = conv && conv.channel;
+  const thread = conv && conv.thread;
+  // 不在 thread 裡＝在頻道直接問＝一定是新的一輪，連 API 都不必打
+  if (!channel || !thread) return '';
+
+  const cache = CacheService.getScriptCache();
+  const ck = 'askid_' + thread;
+  const hit = cache.get(ck);
+  if (hit) return hit;
+
+  if (!provider || !provider.fetchThreadRoot) return '';
+
+  const rootText = provider.fetchThreadRoot(channel, thread);
+  // null＝讀不到（scope／token／網路）、''＝讀到了但沒文字。兩者都當新的一輪。
+  if (!rootText) return '';
+
+  const m = String(rootText).match(ASK_ID_IN_TEXT_RE);
+  if (!m) return '';
+
+  cache.put(ck, m[1], ASK_ROUTE_CACHE_TTL);
+  return m[1];
 }
 
 
@@ -83,7 +148,13 @@ function handleAskRequest(args, conv, user, provider) {
   }
 
   const gate = _checkAskPassphrase_(prompt);
-  if (!gate.ok) {
+
+  // 密語沒對時還有第二條路：這一串先前已經受理過一次 ask（見上面的閘門說明）。
+  // 反查是一次 Slack API 呼叫，所以只在**真的需要它來放行**時才提前付這個成本；
+  // 密語對了的話留到後面所有廉價檢查之後再查。
+  let continueId = gate.ok ? '' : _resolveAskIdFromThread_(conv, provider);
+
+  if (!gate.ok && !continueId) {
     // 不透露密語本身——透露了就等於沒有閘門。
     //
     // ASK_OWNER 要放 Slack **user id**（U 開頭），不是顯示名：`<@pedro>` 在
@@ -119,17 +190,27 @@ function handleAskRequest(args, conv, user, provider) {
     return;
   }
 
+  // 反查放在所有廉價檢查**之後**：它是一次 Slack API 呼叫，而被密語擋下、
+  // 被節流擋下、問題太長的那些路徑都不該付這個成本（3 秒預算很緊）。
+  // 靠 thread 豁免進來的那條路上面已經查過了，不重複打 API。
+  if (!continueId) continueId = _resolveAskIdFromThread_(conv, provider);
+
   // 先貼受理訊息取得 thread 錨點，再 dispatch。
   //
   // 與 _triggerPipelineTask_ 同一個順序，理由也相同：答案要回到哪裡必須在
   // dispatch 之前就定案，而使用者在頻道裡直接 @ 時根本還沒有 thread。
   // postAccepted 會用受理訊息自己的 ts 當錨點，於是幾分鐘後答案回來時是掛在
   // 這則底下，不會洗頻。
+  //
+  // 受理訊息要講明是不是續問：那決定了「他能不能期待我懂上文」。看起來像客套，
+  // 但反查失敗時他會直接從這句話看出來，不必等幾分鐘後收到一則答非所問的回覆。
   const anchored = provider.postAccepted(conv,
-    '🔍 收到 <@' + user + '> 的提問，正在查…' + '\u000a' +
+    (continueId
+      ? '🔍 收到 <@' + user + '> 的追問，接續這個 thread 的上文，正在查…'
+      : '🔍 收到 <@' + user + '> 的提問，正在查…') + '\u000a' +
     '_這需要幾分鐘。查完會回在這則底下。_');
 
-  const ok = dispatchAsk(asked, user, anchored);
+  const ok = dispatchAsk(asked, user, anchored, continueId);
 
   if (ok) {
     // 節流標記只在真的送出去之後才寫：dispatch 失敗時他應該可以立刻重試

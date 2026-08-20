@@ -151,8 +151,10 @@ function routeByIntent(text, conv, userId, provider) {
       //   jira-no-verb / verb-no-jira → 反問缺的那一半，補上就能跑對的流程
       //   route-failed                → 那是缺 scope，丟給 agent 也解決不了
       // 還要通過通關密語：測試期間沒有密語的人按了也會被擋，
-      // 附一顆按不動的按鈕只會讓人以為壞了。
-      const offerAsk = (intent.matchedBy === 'no-match') && _askAllowed_(text);
+      // 附一顆按不動的按鈕只會讓人以為壞了。conv / provider 要一起傳——
+      // ask thread 內的追問是靠「這串受理過」豁免密語的，不傳就會在最需要
+      // 這顆按鈕的地方（追問時只打了「再試一次」）反而不附。
+      const offerAsk = (intent.matchedBy === 'no-match') && _askAllowed_(text, conv, provider);
       const blocks = offerAsk ? _askOfferBlocks_(text, conv, userId) : null;
       provider.postMessage(conv.channel, _intentHelpText_(userId, intent), conv.thread, blocks);
     }
