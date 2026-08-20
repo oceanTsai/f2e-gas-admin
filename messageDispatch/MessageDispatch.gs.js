@@ -33,7 +33,7 @@ function doPost(e) {
     // 都接受：notify-question.sh 走 body，早期版本走 query string。
     const action = (e && e.parameter && e.parameter.action) || body.action;
     if (!action) {
-      return _json_({ error: 'Missing action（預期 decision 或 progress）' });
+      return _json_({ error: 'Missing action（預期 decision / progress / answer_result）' });
     }
 
     const provider = getProvider();
@@ -44,6 +44,11 @@ function doPost(e) {
 
       case 'progress':
         return handleProgressUpdate(body, key, provider);
+
+      // 批次回覆的套用結果。入向那側送出時並不知道實際寫進幾題，
+      // 有資訊的那則只能由 augma 在寫完之後發（見 core/outbound.js 的說明）。
+      case 'answer_result':
+        return handleAnswerResult(body, key, provider);
 
       default:
         return _json_({ error: 'Unknown action: ' + action });

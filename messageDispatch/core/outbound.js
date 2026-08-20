@@ -86,3 +86,80 @@ function handleProgressUpdate(body, key, provider) {
   return ContentService.createTextOutput(JSON.stringify({ status: 'ok' }))
     .setMimeType(ContentService.MimeType.JSON);
 }
+
+
+// ═══════════════════════════════════════════════════════════════════
+//  批次回覆結果回報（由 augma 的 notify-answer-result.sh 呼叫）
+//
+//  為什麼這則要由 augma 發、而不是通訊層自己回：
+//  入向的 GAS 收到整串貼上時，只用行首樣式**撈題號**去查去重快取——它不配對
+//  答案、不查閘門、也不知道 progress.json 裡那些題現在是什麼狀態。所以它只能
+//  回一句中性的「已收下，正在套用」。實際寫進幾題、哪幾題被閘門擋下、哪幾題
+//  對不上，要等 update-progress.sh answer-batch 跑完才知道。
+//
+//  卡片按鈕的說明也放在這裡：文字回覆路徑刻意不動原卡片（app_mention 拿不到
+//  payload.message.blocks，只能整張替換，那會把其他題的按鈕一起吃掉）。
+//  去重鎖已經保證按了不會重複處理，所以這只是體感問題——用一句話講清楚就好。
+// ═══════════════════════════════════════════════════════════════════
+
+function handleAnswerResult(body, key, provider) {
+  const notifyKey = PropertiesService.getScriptProperties().getProperty('NOTIFY_KEY');
+  if (notifyKey && key !== notifyKey) {
+    return ContentService.createTextOutput(JSON.stringify({ error: 'Unauthorized: invalid notify key' }))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+
+  const conv = body.conversation || {};
+  if (!conv.channel && !conv.space) {
+    return ContentService.createTextOutput(JSON.stringify({ error: 'Missing channel or space' }))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+
+  const s = body.summary || {};
+  const jiraId = body.jira_id || '';
+  const list = function (a) { return (a || []).join('、'); };
+  const n = function (a) { return (a || []).length; };
+
+  const lines = [];
+  const by = s.by ? (s.by + ' ') : '';
+
+  if (n(s.applied)) {
+    lines.push('✅ ' + by + '的批次回覆已寫入 ' + jiraId + '：' + list(s.applied));
+  } else {
+    lines.push('ℹ️ ' + by + '貼上的內容沒有寫入任何一題（' + jiraId + '）。');
+  }
+
+  if (n(s.skipped_already_answered)) {
+    lines.push('• ' + list(s.skipped_already_answered) + ' 先前已有答覆，這次未覆蓋。');
+  }
+  if (n(s.rejected_gate)) {
+    lines.push('• ' + list(s.rejected_gate) + ' 是放行閘門，只能點卡片按鈕——' +
+               '文字回覆不生效（phase-guard 看到「有答覆」就會放行，不解讀語意）。');
+  }
+  if (n(s.unmatched)) {
+    lines.push('⚠️ ' + list(s.unmatched) + ' 在這張單裡找不到對應的題，已忽略。' +
+               '（補問清單與流程的題號可能不同步，請回報）');
+  }
+  if (n(s.ignored_assumptions)) {
+    lines.push('• 已忽略 ' + n(s.ignored_assumptions) + ' 條 AI 假設確認（' +
+               list(s.ignored_assumptions) + '）——目前沒有地方記錄它們。');
+  }
+
+  if (n(s.still_pending)) {
+    lines.push('');
+    lines.push('🔴 還有 ' + n(s.still_pending) + ' 題待回覆，全部答完才會接續：' +
+               list(s.still_pending));
+  } else if (n(s.applied)) {
+    lines.push('');
+    lines.push('🎉 本階段全部答完，流程接續中…');
+  }
+
+  if (n(s.applied)) {
+    lines.push('_卡片上這幾題的按鈕可以忽略，點了會被擋下。_');
+  }
+
+  provider.postMessage(conv.channel, lines.join('\u000a'), conv.thread || conv.thread_ts || null);
+
+  return ContentService.createTextOutput(JSON.stringify({ status: 'ok' }))
+    .setMimeType(ContentService.MimeType.JSON);
+}

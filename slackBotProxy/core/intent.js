@@ -1,43 +1,29 @@
 // ═══════════════════════════════════════════════════════════════════
-//  意圖識別（規則層）
+//  意圖路由層
 //
-//  目的：讓人可以直接 @Alice 講話，不必記 `/ra`、`/sa`、`answer Q-002` 這些
-//  語法——那些是 pipeline 目錄結構長在使用者介面上，不是人的心智模型。
+//  職責邊界（這是這次重構的重點）：
 //
-//  這一層刻意**只有規則、沒有 LLM**：
-//    1. 規則能吃掉大部分流量，零延遲、零成本、零資料外流。
-//    2. 沒接住的句子會被記錄下來（見 _recordIntentMiss_）。那份清單就是日後
-//       設計 LLM 分類 prompt 的真實語料——憑想像寫的 prompt 一定是錯的。
-//    3. slash command 一律保留，永遠不經過這一層：意圖層掛掉時系統還能用，
-//       熟練使用者打指令也更快。
+//    這一層（router）        分類器（core/classifiers/*）
+//    ─────────────────────  ──────────────────────────────
+//    準備事實：正規化、撈    只做判斷，吃 ctx 回 intent
+//    單號、反查 thread       **純函式**：不打網路、不寫狀態
+//    記錄「沒接住」的語料
+//    依 action 派發
 //
-//  ⚠️ 規則接不住時的正確行為是**反問**，不是猜。猜錯會跑錯 pipeline，
-//     那是不可逆的（會建分支、跑 agent、燒 runner）；反問只是多一次往返。
+//  為什麼要這樣切：以前 classifyIntent 裡面同時做網路 I/O（反查 thread）與
+//  持久化（寫 miss 語料）。那讓「換一個分類器」實際上變成「連副作用一起複製
+//  一份」——LLM 版**也**需要單號反查，卻不該再實作一次。
+//
+//  副作用移出來還順手修掉一個浪費：反查以前會做兩次（分類器一次、
+//  handleTextAnswer 再一次）。成功時第二次只是多讀一次 CacheService，但**反查
+//  失敗時不進快取**，於是缺 channels:history 的情況下每則訊息真的會打兩次
+//  Slack API、兩次都失敗。現在 router 做一次、結果往下傳。
+//
+//  slash command 一律不經過這一層（見 slackBotProxy.js 的 default 分支）：
+//  意圖層掛掉時系統還能用，熟練使用者打指令也更快。
 // ═══════════════════════════════════════════════════════════════════
 
 const JIRA_KEY_RE = /\b([A-Z][A-Z0-9]+-\d+)\b/;
-
-// 反查失敗時給出可行動的下一步。實務上幾乎都是 scope 沒補、或補了沒重新安裝 App。
-const ROUTE_HINT = '請直接說單號（例：`@Alice VIPOP-12345 進度`），'
-  + '或確認 Alice 有 `channels:history` 權限（改過 scope 後要重新安裝 App 才生效）。';
-
-// full 要排在 sa / ra 之前判斷：「ra 到 sa 一路跑完」同時命中三者
-const RE_FULL   = /(full|整套|全部跑|從頭跑|一路跑|端到端|ra\s*(到|＋|\+|and|then)\s*sa)/i;
-const RE_SA     = /(\bsa\b|系統分析|系統設計|架構分析|拆\s*task|工項拆解|design\s*doc)/i;
-const RE_RA     = /(\bra\b|需求分析|規格書|寫規格|產規格|\bspec\b|補問)/i;
-const RE_STATUS = /(狀態|進度|跑到哪|到哪了|做完了嗎|完成了嗎|\bstatus\b|\bprogress\b)/i;
-
-// 只有「整句就是一個狀態查詢」才優先當 status。
-// 這是為了不讓「用 A 方案，因為進度上比較快」被誤判——那句含「進度」但不是查詢。
-//
-// ⚠️ 這條 regex 寧鬆勿緊，因為兩個方向的失敗代價不對稱：
-//   認錯成 status → 使用者看到狀態摘要，再說一次就好（無副作用）
-//   漏認成答覆   → 在決策 thread 裡問「跑到哪了」會被 dispatch 出去當成答覆
-// 所以前綴與尾綴都允許組合（「這張單現在跑到哪了？」）。
-// 前綴後面允許「的」：「這張單的進度」「它現在的狀態」都是很自然的問法，
-// 而漏認的代價是把問句 dispatch 成答覆。
-const RE_PURE_STATUS =
-  /^((?:現在|目前|這張單|這單|這個單|它|他)\s*(?:的)?\s*){0,3}(狀態|進度|跑到哪|到哪|怎麼樣|怎樣|如何|status|progress)\s*((?:了|嗎|呢|如何|怎樣|怎麼樣|喔|吧|哦)\s*){0,2}[?？!！]*$/i;
 
 
 function _extractJiraKey_(text) {
@@ -47,94 +33,64 @@ function _extractJiraKey_(text) {
 
 
 /**
- * 把一句自由文字分類成一個結構化意圖。
+ * 準備事實 → 交給分類器判斷。**無副作用**，可安全地在測試裡重複呼叫。
  *
- * provider 是必要的：判斷「thread 裡有沒有待決問題」要反查 thread 的第一則訊息。
- * 回傳 { action, jiraId, answerText, confidence, matchedBy, restate }
- * action ∈ empty | answer_question | run_ra | run_sa | run_full | status | unknown
+ * 回傳的意圖契約（每個分類器都必須回這個形狀）：
+ *   {
+ *     action,       // empty | answer_question | run_ra | run_sa | run_full | status | unknown
+ *     jiraId,
+ *     answerText,   // action = answer_question 時的原句
+ *     items,        // 正規化後的答案 [{ qid, answerText }]。
+ *                   // 規則層一律 null＝「我沒解析，交給下游」。
+ *                   // 放在意圖契約裡而不是純粹留給下游，是因為 LLM 版可以
+ *                   // 一次呼叫同時產出 action 與正規化結果（它手上已經有句子、
+ *                   // thread 狀態、待答題清單）——拆成兩次呼叫是白付一次延遲與成本。
+ *     confidence,   // high | low
+ *     matchedBy,    // provenance：'pure-status' | 'thread-has-pending' | 'llm' | …
+ *     restate       // 反問用的「我理解成…」
+ *   }
  */
 function classifyIntent(text, conv, provider) {
-  const raw = (text || '').trim();
-  if (!raw) {
-    return { action: 'empty', jiraId: '', answerText: '', confidence: 'high', matchedBy: 'empty' };
-  }
-
-  const jiraInText = _extractJiraKey_(raw);
-  const route = _resolveRouteFromThread_(conv, provider);
-  // 反查失敗（讀不到 thread 第一則訊息）與「這個 thread 本來就沒有任務」是兩件
-  // 完全不同的事，但都會讓 route 沒有單號。分開才給得出可行動的訊息。
-  const routeFailed = !!(route && route.err);
-  const routeJira = (route && route.j) ? route.j : '';
-
-  // ── 規則 1：整句就是狀態查詢 ──────────────────────────────────
-  // 排在答覆之前，否則在決策 thread 裡問「進度？」會被當成答覆送出去。
-  if (RE_PURE_STATUS.test(raw)) {
-    const jira = jiraInText || routeJira;
-    return {
-      action: jira ? 'status' : 'unknown',
-      jiraId: jira,
-      answerText: '',
-      confidence: jira ? 'high' : 'low',
-      matchedBy: routeFailed ? 'pure-status-route-failed' : 'pure-status',
-      restate: jira ? '' : (routeFailed
-        ? '我讀不到這個 thread 的第一則訊息，所以不知道這是哪張單。' + ROUTE_HINT
-        : '你想查哪張單的狀態？')
-    };
-  }
-
-  // ── 規則 2：thread 有待決問題 → 這句話極可能是答覆 ─────────────
-  // 這是準確率最高的一條，因為它看的是**狀態**而不是語意：
-  // 「用 A 方案」在決策 thread 裡是答覆，在空頻道裡毫無意義。
-  // 句子自帶單號時不套用——那更像是要開新任務。
-  if (routeJira && !jiraInText) {
-    return {
-      action: 'answer_question',
-      jiraId: routeJira,
-      answerText: raw,
-      confidence: 'high',
-      matchedBy: 'thread-has-pending'
-    };
-  }
-
-  // ── 規則 3：有單號 + 動作關鍵字 ───────────────────────────────
-  if (jiraInText) {
-    if (RE_FULL.test(raw)) {
-      return { action: 'run_full', jiraId: jiraInText, answerText: '', confidence: 'high', matchedBy: 'jira+full' };
-    }
-    if (RE_SA.test(raw)) {
-      return { action: 'run_sa', jiraId: jiraInText, answerText: '', confidence: 'high', matchedBy: 'jira+sa' };
-    }
-    if (RE_RA.test(raw)) {
-      return { action: 'run_ra', jiraId: jiraInText, answerText: '', confidence: 'high', matchedBy: 'jira+ra' };
-    }
-    if (RE_STATUS.test(raw)) {
-      return { action: 'status', jiraId: jiraInText, answerText: '', confidence: 'high', matchedBy: 'jira+status' };
-    }
-
-    // 有單號但沒說要做什麼 → 反問，不要猜
-    _recordIntentMiss_(raw, conv, 'jira-no-verb');
-    return {
-      action: 'unknown',
-      jiraId: jiraInText,
-      answerText: '',
-      confidence: 'low',
-      matchedBy: 'jira-no-verb',
-      restate: `你想對 ${jiraInText} 做什麼？（需求分析 / 系統分析 / 查狀態）`
-    };
-  }
-
-  // ── 沒接住：記錄語料 ─────────────────────────────────────────
-  // 在 thread 內卻反查不到單號時，這是最常見的真正原因，直接講出來而不是說「沒把握」
-  if (routeFailed) {
-    return {
-      action: 'unknown', jiraId: '', answerText: '', confidence: 'low',
-      matchedBy: 'route-failed',
-      restate: '我讀不到這個 thread 的第一則訊息，所以不知道這是哪張單。' + ROUTE_HINT
-    };
-  }
-  _recordIntentMiss_(raw, conv, 'no-match');
-  return { action: 'unknown', jiraId: '', answerText: '', confidence: 'low', matchedBy: 'no-match', restate: '' };
+  return getClassifier().classify(_buildIntentCtx_(text, conv, provider));
 }
+
+
+/**
+ * 把分類器需要的事實準備好。反查在這裡做**一次**，結果隨 ctx 往下傳到
+ * handleTextAnswer——以前那邊會自己再查一次，成功時只是多讀一次 CacheService，
+ * 但反查失敗時（缺 channels:history）不進快取，於是每則訊息真的會打兩次
+ * Slack API，然後兩次都失敗。
+ */
+function _buildIntentCtx_(text, conv, provider) {
+  // 全形轉半形要在**所有**判斷之前：「第一題選Ａ」的 Ａ 是 U+FF21，
+  // 不轉的話後面每一層的字元比對都會失敗，而且失敗得很安靜。
+  const raw = _toHalfWidth_(text || '').trim();
+  const route = _resolveRouteFromThread_(conv, provider);
+
+  return {
+    raw: raw,
+    jiraInText: _extractJiraKey_(raw),
+    route: route,
+    // thunk 而不是值：它背後是 fetchProgress（一次網路呼叫）。規則層完全不需要
+    // 它，不該為了統一介面就每次都付那個成本。
+    getPending: function () {
+      const jira = (route && route.j) ? route.j : '';
+      if (!jira) return [];
+      const progress = fetchProgress(jira);
+      return ((progress && progress.pending_questions) || []).filter(function (q) {
+        return q && !q.answered;
+      });
+    }
+  };
+}
+
+
+// 真正「規則沒接住、值得收進語料」的命中原因。
+//
+// 刻意不含 route-failed / pure-status-route-failed：那是 scope 或 token 的問題
+// （讀不到 thread 第一則訊息），不是「人這樣講話而規則接不住」。混進去只會讓
+// 語料被基礎設施故障洗版，而那份語料唯一的用途就是判斷要不要接模型。
+const GENUINE_MISS = ['no-match', 'jira-no-verb', 'verb-no-jira', 'answer-unparsed'];
 
 
 /**
@@ -142,14 +98,29 @@ function classifyIntent(text, conv, provider) {
  * 意圖層錯了最多是走錯 handler，不會產生新的失敗模式。
  */
 function routeByIntent(text, conv, userId, provider) {
-  const intent = classifyIntent(text, conv, provider);
+  const ctx = _buildIntentCtx_(text, conv, provider);
+  const intent = getClassifier().classify(ctx);
   console.log('意圖分類：' + JSON.stringify(intent));
+
+  // 記錄「沒接住」是**路由層**的職責：只有它知道最終 outcome。
+  // 之後串上 LLM fallback 時，被模型接住的句子不該進語料，而分類器自己
+  // 判斷不了這件事——它不知道自己是不是最後一棒。
+  if (intent.action === 'unknown' && GENUINE_MISS.indexOf(intent.matchedBy) >= 0) {
+    _recordIntentMiss_(text, conv, intent.matchedBy);
+  }
 
   switch (intent.action) {
     case 'answer_question':
+      // route 已經反查過了，往下傳避免再打一次 Slack API。
       // handleTextAnswer 自己會再查一次 progress.json 確認有沒有待答的題，
       // 所以這裡判斷錯了也不會亂寫——最壞情況是回一句「目前沒有待回覆的問題」。
-      handleTextAnswer(intent.answerText, conv, userId, provider);
+      handleTextAnswer(intent.answerText, conv, userId, provider, {
+        route: ctx.route,
+        // 貼上的補問清單自帶單號，即使不在 thread 裡也認得出是哪張單。
+        // 沒有它的話，貼到頻道（而不是 thread）就會被回「這裡沒有待決問題」。
+        jiraId: intent.jiraId,
+        items: intent.items
+      });
       return;
 
     case 'run_ra':
@@ -187,6 +158,7 @@ function _intentHelpText_(userId, intent) {
     '• `@Alice VIPOP-12345 做系統分析`',
     '• `@Alice VIPOP-12345 進度`（查狀態）',
     '• 在決策卡片的 thread 裡直接回覆你的決定',
+    '• 在補問清單按「複製」，整份貼進決策卡片的 thread（一次回答多題）',
     '',
     '或用指令：`/ra <單號>`、`/sa <單號>`'
   ].join('\u000a');
@@ -200,6 +172,10 @@ function _intentHelpText_(userId, intent) {
 //  就會拿到一份「同仁實際怎麼講話、而規則接不住」的清單。到那時候再決定要不要
 //  接 LLM、要接哪個模型、prompt 怎麼寫——都會比現在憑空設計準得多。
 //  有可能結論是「再加三條規則就夠了」。
+//
+//  `verb-no-jira` 正是那個結論的第一個例子：`@Alice 幫我RA流程` 看起來像
+//  「需要 LLM 才接得住的自然語言」，實際上規則只是缺了對稱的那一半，五行就解決。
+//  所以**先看語料再談模型**，不要反過來。
 // ═══════════════════════════════════════════════════════════════════
 
 const INTENT_MISS_KEY = 'intent_misses';

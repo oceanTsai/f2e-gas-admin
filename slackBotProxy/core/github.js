@@ -37,6 +37,34 @@ function dispatchResume(jiraId, pipeline, questionId, choice, user) {
   return dispatchWorkflow(payload);
 }
 
+// 整份 checkList 貼上：整串原封不動送過去，由 augma 的 answer-batch 自行拆解。
+//
+// 為什麼不在這裡先拆好再送逐題答案：格式知識屬於 augma。
+// `- **Q-001**: A. …` 這個形狀是 checklist.js 的 buildReply() 決定的，它跟
+// update-progress.sh 在同一個 repo、同一次 review 裡。放在 GAS 的話，格式改一次
+// 就要重新部署 Apps Script，而且沒有 CI 會告訴你兩邊不同步。
+//
+// ⚠️ answer 與 answer_batch **互斥**，一次只送其中一個。resume-workflow.yml
+//    兩個都吃，但 apply-answer.sh 會在同時收到時明確失敗——靜默擇一才是真的難查。
+//
+// ⚠️ client_payload 上限 64 KB、top-level 屬性上限 10 個。這裡是 5 個
+//    （單題那條是 6 個），還有空間，但別再無限加欄位。長度截斷由呼叫端負責
+//    （_truncateUtf8_），因為只有它知道要怎麼跟使用者說「被截掉了」。
+function dispatchResumeBatch(jiraId, pipeline, rawText, user) {
+  const payload = {
+    event_type: 'resume',
+    client_payload: {
+      jira_id: jiraId,
+      pipeline: pipeline,
+      answer_batch: rawText,
+      user: user,
+      resume: true
+    }
+  };
+
+  return dispatchWorkflow(payload);
+}
+
 function dispatchWorkflow(payload) {
   const githubToken = PropertiesService.getScriptProperties().getProperty('GITHUB_TOKEN');
   if (!githubToken) {

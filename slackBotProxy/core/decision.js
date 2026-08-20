@@ -18,6 +18,9 @@
 // ═══════════════════════════════════════════════════════════════════
 
 const ROUTE_CACHE_TTL = 21600;   // 6 小時，CacheService 上限
+// 答案去重鎖的存活時間。與 ROUTE_CACHE_TTL 同值但意義完全不同：route 掉了可以
+// 重建，這一把掉了同一題就能被重複回答一次。按鈕路徑與文字路徑共用同一把。
+const ANSWER_CACHE_TTL = 21600;
 const JIRA_IN_TEXT_RE = /\b([A-Z][A-Z0-9]+-\d+)\b/;
 
 // 回傳 null＝根本不在 thread 裡（正常情況，不是錯誤）。
@@ -123,154 +126,116 @@ function _phaseProgress_(progress, phase, jiraId) {
 
 
 // ═══════════════════════════════════════════════════════════════════
-//  文字回覆：@Alice answer [Q-00X] <自由描述>
+//  文字回覆：@Alice answer [Q-00X] <自由描述>，或整份 checkList 貼上
 //
 //  按鈕只能傳回預設選項，表達不了「要改成什麼」。SA 步驟七這類問題的本質就是
 //  「請人給方向」，因此保留一條文字通道。走 app_mention 事件，沒有 Slack 的
 //  3 秒限制，可從容完成 dispatch 與卡片更新。
+//
+//  這支現在只是**接線**：反查 → 讀 progress → 解析 → 派發。
+//  解析與派發各自獨立（見 core/answer.js 的說明），因為接模型時流程會被
+//  回讀確認切成兩個 HTTP 請求，派發那半必須能被單獨呼叫。
+//
+//  opts（可省略）：
+//    route  路由層已經反查過的結果，傳進來避免重複反查
+//    items  分類器已經正規化好的答案。規則層一律 null；LLM 版會填。
 // ═══════════════════════════════════════════════════════════════════
 
-function handleTextAnswer(args, conv, user, provider) {
-  const raw = (args || '').trim();
+function handleTextAnswer(args, conv, user, provider, opts) {
+  const raw = _toHalfWidth_(args || '').trim();
 
   const USAGE = [
     '用法：在決策卡片所在的 thread 內回覆 `@Alice answer <你的答覆>`',
     '要指定題號時：`@Alice answer Q-002 <你的答覆>`',
+    '一次回答多題：在補問清單按「複製」，把整份貼進同一個 thread',
     '（答覆要在卡片的 thread 內——Alice 靠 thread 才知道這是哪張單、要接續哪條 pipeline）'
   ].join('\u000a');
 
   if (!raw) {
-    provider.postMessage(conv.channel, '<@' + user + '> \u26a0\ufe0f 請一併給出答覆內容。' + '\u000a' + USAGE, conv.thread);
+    provider.postMessage(conv.channel, '<@' + user + '> ⚠️ 請一併給出答覆內容。' + '\u000a' + USAGE, conv.thread);
     return;
   }
 
-  // 第一個 token 若形如 Q-002 / q2 就當作問題編號，其餘全部視為答案本文
-  let questionId = null;
-  let answerText = raw;
-  const m = raw.match(/^[Qq]-?(\d{1,3})\s+([\s\S]+)$/);
-  if (m) {
-    questionId = 'Q-' + String(parseInt(m[1], 10)).padStart(3, '0');
-    answerText = m[2].trim();
-  }
-
-  // thread → 哪張單（反查訊息，不存狀態；見上面的說明）
-  const route = _resolveRouteFromThread_(conv, provider);
-  if (!route || !route.j) {
+  // thread → 哪張單（反查訊息，不存狀態；見本檔開頭的說明）。
+  // opts.jiraId 是分類器已經定案的單號——貼上的補問清單標題自帶單號，
+  // 那條路徑不依賴 thread 反查。
+  const route = (opts && opts.route !== undefined)
+    ? opts.route
+    : _resolveRouteFromThread_(conv, provider);
+  const routedJira = (opts && opts.jiraId) || (route && route.j) || '';
+  if (!routedJira) {
     provider.postMessage(conv.channel,
-      '<@' + user + '> \u26a0\ufe0f ' + ((route && route.err === 'fetch-failed')
+      '<@' + user + '> ⚠️ ' + ((route && route.err === 'fetch-failed')
         ? '我讀不到這個 thread 的第一則訊息（多半是缺 `channels:history` 權限，改過 scope 後要重新安裝 App）。'
         : '這裡沒有待決問題。') + '\u000a' + USAGE, conv.thread);
     return;
   }
 
-  const jiraId = route.j;
+  const jiraId = routedJira;
   const progress = fetchProgress(jiraId);
-  // pipeline 由 augma 寫進 progress.json（update-progress.sh init --pipeline）。
-  // 讀不到就不能 dispatch：猜錯會重觸發錯的 pipeline，而那是不可逆的
-  // （ra-pipeline 只跑兩階，full-pipeline 跑七階）。按鈕的 value 帶著正確的
-  // pipeline，所以請使用者改點按鈕，而不是替他賭一把。
-  const pipeline = (progress && progress.pipeline) || '';
+  const pending = ((progress && progress.pending_questions) || []).filter(function (q) {
+    return q && !q.answered;
+  });
 
-  // 決定要回答哪一題：指定了就用指定的，沒指定就挑第一個未答的
-  let question = null;
-  if (questionId) {
-    question = progress ? _findQuestion_(progress, questionId) : null;
-    if (progress && !question) {
-      provider.postMessage(conv.channel,
-        '<@' + user + '> 找不到 ' + jiraId + ' 的 ' + questionId + ' 這一題。', conv.thread);
-      return;
-    }
-    // progress 讀不到（產物還沒 push）但有明確題號 → 照樣 dispatch，只是跳過閘門
-    // 檢查與進度顯示。augma 的 update-progress.sh answer 找不到該題會自己失敗，
-    // 不會靜默寫錯。
+  // 分類器已經正規化好就直接用（LLM 版會填 items）；否則自己解析。
+  // 兩條路產出同一個形狀，所以下面的派發完全不知道 items 從哪來。
+  let parsed;
+  if (opts && opts.items && opts.items.length) {
+    parsed = {
+      mode: (opts.items.length >= 2) ? 'batch' : 'single',
+      items: opts.items,
+      ignoredAssumptions: [],
+      confidence: 'high',
+      reason: ''
+    };
   } else {
-    if (!progress) {
-      provider.postMessage(conv.channel,
-        '<@' + user + '> 暫時讀不到 ' + jiraId +
-        ' 的流程狀態，請改成明確指定題號：`@Alice answer Q-001 <你的答覆>`',
-        conv.thread);
-      return;
-    }
-    const pendingCache = CacheService.getScriptCache();
-    const pending = ((progress.pending_questions) || []).filter(function (q) {
-      return q && !q.answered && !pendingCache.get(_answerKey_(jiraId, q.id));
-    });
-    if (pending.length === 0) {
-      provider.postMessage(conv.channel,
-        '<@' + user + '> ' + jiraId + ' 目前沒有待回覆的問題。', conv.thread);
-      return;
-    }
-    question = pending[0];
-    questionId = question.id;
+    parsed = _parseAnswerText_(raw, pending);
   }
 
-  if (!pipeline) {
+  // 指了某一題但沒給題號（「第一題選A」「1. B 2. C」）→ 反問，不猜。
+  // 這是規則層的邊界，也是日後接模型的接點：那份語料就是判斷「值不值得接」的依據。
+  if (parsed.mode === 'unparsed') {
+    _recordIntentMiss_(raw, conv, 'answer-unparsed');
     provider.postMessage(conv.channel,
-      '<@' + user + '> 讀不到 ' + jiraId + ' 要接續哪條 pipeline，沒辦法安全地用文字接續。' +
-      '請直接點卡片上的按鈕（按鈕本身帶著這個資訊）。', conv.thread);
+      _answerAmbiguousText_(user, jiraId, pending), conv.thread);
     return;
   }
 
-  // 閘門型問題只能點按鈕，不能用文字回覆。
-  // 原因：resume_action = complete 時，phase-guard 只要看到「有答覆」就會判定
-  // COMPLETE_ONLY 直接放行下一階段——它不會（也不該）去解讀答覆的語意。
-  // 若允許文字回覆，使用者打「先不要跑」反而會讓下一階段跑起來，與意圖完全相反。
-  if (question && question.resume_action === 'complete') {
-    provider.postMessage(conv.channel,
-      '<@' + user + '> \u2139\ufe0f ' + questionId +
-      ' 是放行閘門，請直接點卡片上的按鈕。' + '\u000a' +
-      '若還不想放行，就先不要動作——卡片會留在這裡等你。' + '\u000a' +
-      '需要補充說明時請直接在 thread 討論，那不會觸發任何流程。',
-      conv.thread);
-    return;
-  }
+  _applyAnswerItems_(parsed.items, {
+    mode: parsed.mode,
+    jiraId: jiraId,
+    pipeline: (progress && progress.pipeline) || '',
+    progress: progress,
+    conv: conv,
+    user: user,
+    provider: provider,
+    rawBatch: raw,
+    ignoredAssumptions: parsed.ignoredAssumptions
+  });
+}
 
-  // 與按鈕共用同一把去重鎖與快取鍵：同一題只受理一次
-  const lock = LockService.getScriptLock();
-  if (!lock.tryLock(5000)) {
-    provider.postMessage(conv.channel, '<@' + user + '> \u23f3 系統忙碌中，請稍後再試。', conv.thread);
-    return;
-  }
 
-  try {
-    const cache = CacheService.getScriptCache();
-    const cacheKey = _answerKey_(jiraId, questionId);
-    const dup = _alreadyAnswered_(jiraId, questionId, question);
-    if (dup.answered) {
-      provider.postMessage(conv.channel,
-        '<@' + user + '> \u2139\ufe0f ' + questionId + ' 已由 ' + dup.by + ' 回答，本次回覆不生效。',
-        conv.thread);
-      return;
-    }
-    cache.put(cacheKey, '<@' + user + '>', 21600);
-
-    // 1. 先觸發 resume（唯一不可失敗的動作）
-    const ok = dispatchResume(jiraId, pipeline, questionId, answerText, '<@' + user + '>');
-
-    // 2. 刻意**不動原卡片**：文字回覆走 app_mention 事件，拿不到 payload.message.blocks，
-    //    只能整張替換——那會把同一張卡片上其他題的按鈕一起吃掉。
-    //    該題若被重複點擊，會被去重擋下並收到提示，所以按鈕留著不會造成重複處理。
-
-    if (ok) {
-      let tail = '正在接續 ' + pipeline + '（' + jiraId + '）…';
-      if (progress && question) {
-        // cacheKey 已寫入，所以這裡算出的 remaining 已排除本題
-        const p = _phaseProgress_(progress, question.phase, jiraId);
-        if (p.remaining.length > 0) {
-          tail = '（本階段還有 ' + p.remaining.length + ' 題待回覆，全部答完才會接續）';
-        }
-      }
-      provider.postMessage(conv.channel,
-        '\u2705 已收下 <@' + user + '> 對 ' + questionId + ' 的回覆。' + tail, conv.thread);
-    } else {
-      cache.remove(cacheKey);   // dispatch 失敗要讓人能重試
-      provider.postMessage(conv.channel,
-        '\u26a0\ufe0f <@' + user + '> 回覆已記錄，但觸發 GitHub Actions 失敗，' +
-        '請確認 GITHUB_TOKEN 或稍後重試。', conv.thread);
-    }
-  } finally {
-    lock.releaseLock();
-  }
+/**
+ * 「你指的是哪一題？」——把待答清單列出來，讓人可以直接照著回。
+ *
+ * 刻意列出**題號與題目**而不是只說「請指定題號」：使用者手上沒有那份清單，
+ * 卡片可能已經被洗到很上面。列出來就能直接複製貼上。
+ */
+function _answerAmbiguousText_(user, jiraId, pending) {
+  const lines = [
+    '<@' + user + '> 這句我看得出是在回答，但不確定是哪一題——猜錯會把答案寫到別題上，' +
+    '所以先跟你確認。',
+    '',
+    jiraId + ' 目前待回覆：'
+  ];
+  pending.slice(0, 8).forEach(function (q) {
+    lines.push('• `' + q.id + '` ' + String(q.question || '').slice(0, 80));
+  });
+  if (pending.length > 8) lines.push('_…另有 ' + (pending.length - 8) + ' 題_');
+  lines.push('');
+  lines.push('請帶上題號再說一次，例：`@Alice answer ' + (pending[0] ? pending[0].id : 'Q-001') + ' 用 A 方案`');
+  lines.push('或在補問清單按「複製」，把整份貼進來（一次回答多題）。');
+  return lines.join('\u000a');
 }
 
 
@@ -331,8 +296,9 @@ function handleInteraction(payload, provider, key) {
       return _emptyResponse_();
     }
 
-    // 標記為已回答並記下回答者 (快取 6 小時)，供後到者的提示使用
-    cache.put(cacheKey, String(user), 21600);
+    // 標記為已回答並記下回答者 (快取 6 小時)，供後到者的提示使用。
+    // 與文字／批次路徑共用同一把鎖與同一個 TTL——不共用的話同一題會被寫兩次。
+    cache.put(cacheKey, String(user), ANSWER_CACHE_TTL);
 
     const now = new Date();
     const timeStr = Utilities.formatDate(now, 'Asia/Taipei', 'HH:mm:ss');
@@ -417,7 +383,7 @@ const PHASE_LABEL = {
 const PHASE_ICON = {
   completed: '\u2705',
   running: '\u23f3',
-  awaiting_decision: '\U0001f534',
+  awaiting_decision: '\uD83D\uDD34',
   failed: '\u274c'
 };
 
@@ -456,7 +422,7 @@ function handleStatusQuery(jiraId, conv, user, provider) {
   });
   if (pend.length) {
     lines.push('');
-    lines.push('\U0001f534 *' + pend.length + ' 題待回覆*（全部答完才會接續）：');
+    lines.push('\uD83D\uDD34 *' + pend.length + ' 題待回覆*（全部答完才會接續）：');
     pend.slice(0, 5).forEach(function (q) {
       lines.push('\u2022 `' + q.id + '` ' + String(q.question || '').slice(0, 90));
     });
