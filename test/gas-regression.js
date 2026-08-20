@@ -304,7 +304,7 @@ console.log('\n[2] slackBotProxy — 意圖識別規則');
   assert.ok(r.restate.indexOf('VIPOP-12345') >= 0);
   ok('有單號但沒說要幹嘛 → 反問，不猜');
 
-  // 規則 3 的對稱分支：有動詞但沒單號。以前缺這一段，'幫我RA流程' 會掉到
+  // 規則 4 的對稱分支：有動詞但沒單號。以前缺這一段，'幫我RA流程' 會掉到
   // no-match 回通用求助訊息——看起來像「需要 LLM」，實際上只是規則缺一半。
   r = co('幫我RA流程');
   assert.strictEqual(r.matchedBy, 'verb-no-jira');
@@ -317,7 +317,7 @@ console.log('\n[2] slackBotProxy — 意圖識別規則');
   ok('有動詞沒單號 → 反問缺的那一半（不是 no-match，也不需要 LLM）');
 
   // ⚠️ 迴歸：貼上整份 checkList 曾經被判成 run_ra，整條 pipeline 重跑一次。
-  // 複製結果的第一行 '## VIPOP-46703 PO 補問回覆' 同時帶了單號（讓規則 2 的
+  // 複製結果的第一行 '## VIPOP-46703 PO 補問回覆' 同時帶了單號（讓規則 3 的
   // !jiraInText 守衛失效）與「補問」二字（命中 RE_RA）。這是不可逆的誤判：
   // 建分支、跑 agent、燒 runner，而答案一題都沒進去。
   const PASTED = [
@@ -345,14 +345,14 @@ console.log('\n[2] slackBotProxy — 意圖識別規則');
   assert.ok(r.restate.indexOf('VIPOP-99999') >= 0 && r.restate.indexOf('VIPOP-46703') >= 0);
   ok('貼到別張單的 thread → 拒收（不替他猜要寫哪一張）');
 
-  // 單行訊息不受規則 0 影響
+  // 單行訊息不受規則 1 影響
   assert.strictEqual(c('VIPOP-99999 補問清單好了嗎').action, 'run_ra');
-  ok('單行訊息不受規則 0 影響（只有多行 + 行首題號才算貼上）');
+  ok('單行訊息不受規則 1 影響（只有多行 + 行首題號才算貼上）');
 
-  // 在決策 thread 裡講同一句話仍然是答覆：規則 2 看的是狀態，排在動詞之前。
+  // 在決策 thread 裡講同一句話仍然是答覆：規則 3 看的是狀態，排在動詞之前。
   // 這條要守住，否則 PM 在 thread 裡打「我覺得要重跑 RA」會變成開新任務。
   assert.strictEqual(c('幫我RA流程').action, 'answer_question');
-  ok('thread 有待決問題時，動詞不搶走答覆（規則 2 優先）');
+  ok('thread 有待決問題時，動詞不搶走答覆（規則 3 優先）');
 
   // 分類器是純函式：只 classify 不該寫任何語料
   PropertiesService.getScriptProperties().deleteProperty('intent_misses');
@@ -1047,6 +1047,154 @@ console.log('\n[3e-2] slackBotProxy — 續問接續同一支 ask 分支');
   assert.strictEqual(dispatched[0].askId, 'UAAA-20260820-100000',
     '歸屬留在最早那一支，否則同一串會在兩支分支之間跳');
   ok('串裡有多個看板 → 取最早那一個');
+  `);
+}
+
+
+// ══════════════════════════════════════════════════════════════════
+console.log('\n[3e-4] slackBotProxy — thread 的歸屬：ask 串 vs 任務串');
+// 實戰換來的一整條連鎖。使用者在一支已中止的 ask 串底下打「@Alice 再試一次」，
+// 收到的是「暫時讀不到 U0BP6PJQGKB-20260820 的流程狀態，請改成明確指定題號：
+// @Alice answer Q-001 …」——他只是要它重跑一次，而那個單號根本不存在。
+//
+// 成因是三段，每一段單獨看都合理：
+//   1. JIRA_IN_TEXT_RE 把提問編號 `U0BP6PJQGKB-20260820-132620` 吃成
+//      `U0BP6PJQGKB-20260820`（`-` 是非 word 字元，所以 \b 在那裡成立）
+//   2. 於是 route 有「單號」→ 規則 3（thread 有待決問題）命中、信心 high
+//   3. handleTextAnswer 讀不到那張不存在的單的 progress.json → 要人指定題號
+// 所以這一節同時鎖住三件事：樣式不可以再吃到提問編號、ask 串的歸屬優先於單號、
+// 兩種 thread 的分類結果不可以互相污染。
+// ══════════════════════════════════════════════════════════════════
+{
+  const env = mkEnv();
+  Object.assign(global, env.globals);
+  const posted = [], dispatched = [];
+  let threadMsgs = [];
+  let fetchCalls = 0;
+  const H = t => ({ text: t, bot: false });
+  const B = t => ({ text: t, bot: true });
+  const provider = {
+    name: 'slack',
+    fetchThreadTexts: () => { fetchCalls++; return threadMsgs; },
+    postMessage: (ch, text) => { posted.push(text); return { ts: '1700.9' }; },
+    postAccepted: (conv, text) => {
+      posted.push(text);
+      return { provider:'slack', channel: conv.channel, thread: conv.thread || '1700.9', status_ts: '1700.9' };
+    },
+  };
+
+  eval(src(INTENT_SRC) + `
+  dispatchAsk = function (prompt, uid, conv, askId) {
+    dispatched.push({ kind: 'ask', prompt: prompt, askId: askId });
+    return true;
+  };
+  dispatchResume = function () {
+    dispatched.push({ kind: 'resume', args: Array.prototype.slice.call(arguments, 0, 3) });
+    return true;
+  };
+  fetchProgress = function () { return null; };
+
+  const BOARD_ASK  = '\u{1F680} *U0BP6PJQGKB-20260820-132620*\u3000\`ask\`\u3000(0/1)';
+  const BOARD_RA   = '\u{1F680} *VIPOP-46703*\u3000\`ra-pipeline\`\u3000(2/4)';
+  const reset = function () { posted.length = 0; dispatched.length = 0; fetchCalls = 0; };
+  const conv = function (ts) { return { provider:'slack', channel:'C1', thread: ts }; };
+
+  // ── ① 樣式：提問編號不可以被吃成單號 ───────────────────────────
+  assert.strictEqual(_extractJiraKey_('U0BP6PJQGKB-20260820-132620 再試一次'), '',
+    '提問編號的前半段長得像單號，但它不是單號');
+  assert.strictEqual(_extractJiraKey_('幫 VIPOP-46703 寫規格書'), 'VIPOP-46703',
+    '真的單號還是要撈得到');
+  assert.strictEqual(_extractJiraKey_('VIPOP-46703 的事'), 'VIPOP-46703');
+  ok('單號樣式排除 ask 提問編號（而且只有一份樣式，router 與反查共用）');
+
+  // ── ② ask 串：任何一句都是追問，不是答覆 ───────────────────────
+  // 這就是那則「請改成明確指定題號」的原始情境。
+  threadMsgs = [H('<@UALICE> ask 幫我查登入流程'), B(BOARD_ASK)];
+  reset();
+  const r1 = _resolveRouteFromThread_(conv('1700.1'), provider);
+  assert.strictEqual(r1.kind, 'ask');
+  assert.strictEqual(r1.ask, 'U0BP6PJQGKB-20260820-132620');
+  assert.strictEqual(r1.j, '', 'ask 串沒有單號可言');
+
+  const i1 = classifyIntent('再試一次', conv('1700.1'), provider);
+  assert.strictEqual(i1.action, 'ask_followup');
+  assert.strictEqual(i1.matchedBy, 'ask-thread');
+  assert.notStrictEqual(i1.action, 'answer_question');
+
+  reset();
+  routeByIntent('再試一次', conv('1700.1'), 'U1', provider);
+  assert.strictEqual(dispatched.length, 1);
+  assert.strictEqual(dispatched[0].kind, 'ask', '要接續 ask，不可以走 dispatchResume');
+  assert.strictEqual(dispatched[0].prompt, '再試一次');
+  assert.strictEqual(dispatched[0].askId, 'U0BP6PJQGKB-20260820-132620',
+    '追問要回到同一支分支，否則 agent 看不到上文');
+  assert.ok(!posted.some(t => t.indexOf('指定題號') >= 0),
+    '這一則就是 bug 的長相：ask 串裡不該出現「請指定題號」');
+  ok('ask 串內「再試一次」→ 接續同一支分支，不再被要求指定題號');
+
+  // ── ③ 提問句自帶單號 → 那是提問內容，不是這串的歸屬 ─────────────
+  // Alice 回在觸發訊息底下，所以第一則是人打的那句話。它帶著單號時，
+  // 舊寫法會把整串判成那張單的決策 thread——而那個判斷還會被快取六小時。
+  threadMsgs = [H('<@UALICE> ask VIPOP-46703 的規格寫到哪了'), B(BOARD_ASK)];
+  reset();
+  const r2 = _resolveRouteFromThread_(conv('1700.2'), provider);
+  assert.strictEqual(r2.kind, 'ask');
+  assert.strictEqual(r2.j, '', '單號在提問內容裡，不代表這串是那張單的 thread');
+  assert.strictEqual(classifyIntent('再試一次', conv('1700.2'), provider).action, 'ask_followup');
+  ok('ask 的提問句自帶單號 → 仍然是 ask 串（ask 優先於單號）');
+
+  // ── ④ 看板還沒推上來 → 照樣認定是 ask 串，而且不快取 ───────────
+  // 不快取是關鍵：看板一到就要接得起來。而「認定是 ask 串」也是必要的——
+  // 提問句帶著單號時，退回去當任務串會把整串鎖死成錯的歸屬。
+  threadMsgs = [H('<@UALICE> ask VIPOP-46703 的規格寫到哪了'),
+                B('\u{1F50D} 收到 <@U1> 的提問，正在查…')];
+  reset();
+  const r3 = _resolveRouteFromThread_(conv('1700.3'), provider);
+  assert.strictEqual(r3.kind, 'ask');
+  assert.strictEqual(r3.ask, '', '還沒有編號＝當新的一輪');
+  threadMsgs = [H('<@UALICE> ask VIPOP-46703 的規格寫到哪了'), B(BOARD_ASK)];
+  const r3b = _resolveRouteFromThread_(conv('1700.3'), provider);
+  assert.strictEqual(r3b.ask, 'U0BP6PJQGKB-20260820-132620',
+    '看板推上來之後要接得起來（所以剛才那次不可以進快取）');
+  ok('看板還沒推上來 → 仍是 ask 串、不快取，看板一到就接上');
+
+  // ── ⑤ 任務串不可以被 ask 規則搶走 ───────────────────────────────
+  // 決策 thread 裡的「用 A 方案」必須還是答覆。歸屬看**第一則**，所以就算
+  // 有人在同一串裡打過 @Alice ask（串裡因此多了一則 ask 看板），也不會變。
+  threadMsgs = [H('<@UALICE> ra VIPOP-46703'), B(BOARD_RA), B(BOARD_ASK)];
+  reset();
+  const r4 = _resolveRouteFromThread_(conv('1700.4'), provider);
+  assert.strictEqual(r4.kind, 'jira');
+  assert.strictEqual(r4.j, 'VIPOP-46703');
+  const i4 = classifyIntent('用 A 方案', conv('1700.4'), provider);
+  assert.strictEqual(i4.action, 'answer_question');
+  assert.strictEqual(i4.jiraId, 'VIPOP-46703');
+  ok('任務串仍然是答覆（歸屬看第一則——串裡多一則 ask 看板不會改變歸屬）');
+
+  // ── ⑥ 兩種歸屬都只反查一次 ──────────────────────────────────────
+  // 這一條擋的是效能回歸：3 秒預算很緊，而「答覆決策」是最熱的那條路。
+  threadMsgs = [H('<@UALICE> ask 幫我查登入流程'), B(BOARD_ASK)];
+  reset();
+  classifyIntent('再試一次', conv('1700.5'), provider);
+  assert.strictEqual(fetchCalls, 1);
+  classifyIntent('那第二點再展開', conv('1700.5'), provider);
+  assert.strictEqual(fetchCalls, 1, 'ask 串的歸屬要進快取');
+  threadMsgs = [H('<@UALICE> ra VIPOP-46703'), B(BOARD_RA)];
+  reset();
+  classifyIntent('用 A 方案', conv('1700.6'), provider);
+  assert.strictEqual(fetchCalls, 1);
+  classifyIntent('改用 B', conv('1700.6'), provider);
+  assert.strictEqual(fetchCalls, 1, '任務串的歸屬也要進快取（同一份，不是兩份）');
+  ok('兩種歸屬共用同一份快取，同一 thread 只反查一次');
+
+  // ── ⑦ 反查失敗 → 兩邊都降級，不可以自作聰明 ─────────────────────
+  threadMsgs = null;
+  reset();
+  const r5 = _resolveRouteFromThread_(conv('1700.7'), provider);
+  assert.strictEqual(r5.err, 'fetch-failed');
+  assert.strictEqual(r5.kind, '');
+  assert.strictEqual(classifyIntent('再試一次', conv('1700.7'), provider).matchedBy, 'route-failed');
+  ok('反查失敗 → 講出原因（缺 scope），不當成任何一種歸屬');
   `);
 }
 

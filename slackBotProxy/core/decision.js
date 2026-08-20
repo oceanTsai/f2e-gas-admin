@@ -1,7 +1,7 @@
 
 
 // ═══════════════════════════════════════════════════════════════════
-//  反查「這個 thread 是哪張單」
+//  反查「這個 thread 屬於誰」
 //
 //  ⚠️ 這裡沒有任何持久狀態，是刻意的。
 //
@@ -15,17 +15,54 @@
 //
 //  CacheService 只是純快取：thread root 永遠不會變，同一個 thread 的第二次回覆
 //  就不必再打一次 Slack API。掉了隨時可重建，所以不是狀態。
+//
+//  ⚠️ thread 的歸屬有**兩種**，而且必須在同一個函式裡決定：
+//
+//    任務串  第一則訊息帶 JIRA 單號（受理訊息、決策卡片 summary、人打的
+//            `@Alice ra VIPOP-46703`）→ 串裡的話是「答覆待決問題」
+//    ask 串  Alice 的看板標題帶提問編號 `<uid>-8碼-6碼`（＝分支名 ask/<id>）
+//            → 串裡的話是「同一支分支的追問」
+//
+//  拆成兩個函式各自反查、各自快取的話，會出現「這一則判成 ask、下一則判成
+//  任務」——同一串的歸屬在兩次 HTTP 請求之間跳掉。實測踩過的形狀是這樣：
+//  `@Alice ask VIPOP-46703 的規格寫到哪`，第一則（人那句）**帶著單號**，
+//  於是單號反查成功、ask 反查根本不會被呼叫，整串被當成 VIPOP-46703 的決策
+//  thread，之後每一句追問都被當成答覆送去 dispatch。
+//  所以 ask 優先：那個單號是提問**內容**，不是這串的歸屬。
 // ═══════════════════════════════════════════════════════════════════
 
 const ROUTE_CACHE_TTL = 21600;   // 6 小時，CacheService 上限
+// 快取鍵刻意從 `route_` 換成 `rt2_`：舊鍵裡可能存著被截斷的假單號（見
+// JIRA_IN_TEXT_RE 的說明），而它會活 6 小時。換鍵等於部署即失效，不必等它過期，
+// 也不必寫相容邏輯去分辨新舊格式。
+const ROUTE_CACHE_PREFIX = 'rt2_';
 // 答案去重鎖的存活時間。與 ROUTE_CACHE_TTL 同值但意義完全不同：route 掉了可以
 // 重建，這一把掉了同一題就能被重複回答一次。按鈕路徑與文字路徑共用同一把。
 const ANSWER_CACHE_TTL = 21600;
-const JIRA_IN_TEXT_RE = /\b([A-Z][A-Z0-9]+-\d+)\b/;
+
+// JIRA 單號。尾端的 `(?!-\d)` 是實戰換來的，不是防禦性寫法：
+// ask 的提問編號長成 `U0BP6PJQGKB-20260820-132620`，而它的前半段剛好符合單號
+// 形狀——`-` 是非 word 字元，所以 `\b` 在那裡**成立**。沒有這個斷言，ask 串會被
+// 反查成一張根本不存在的單 `U0BP6PJQGKB-20260820`，然後：
+//   規則 3（thread 有待決問題）命中 → 每句話都被判成答覆，信心 high
+//   → handleTextAnswer 讀不到那張單的 progress.json
+//   → 回一句「暫時讀不到流程狀態，請改成明確指定題號」
+// 人只是在 ask 串裡說「再試一次」，卻被要求指定題號。錯得離事發點很遠，
+// 所以修在最上游。
+const JIRA_IN_TEXT_RE = /\b([A-Z][A-Z0-9]+-\d+)\b(?!-\d)/;
+
+// 提問編號（＝分支名 ask/<id> 的後半段）。樣式要夠緊，否則會把別的 thread 認成
+// ask 串：這裡要求 `-8位數-6位數` 兩段，與 JIRA 單號（VIPOP-46703）無交集。
+const ASK_ID_IN_TEXT_RE = /([A-Za-z0-9]+-[0-9]{8}-[0-9]{6})/;
+
+// 「第一則訊息就是 ask 的觸發句」。需要它的唯一理由是上面那個
+// `@Alice ask VIPOP-46703 …` 的情況：單號反查會成功，但那串其實是 ask 串。
+// Slack 傳回的原文帶著 `<@U…>` 形式的 mention，所以前綴要允許它。
+const ASK_TRIGGER_IN_ROOT_RE = /^\s*(?:<@[^>]+>\s*)*ask\b/i;
 
 // 回傳 null＝根本不在 thread 裡（正常情況，不是錯誤）。
-// 回傳 { j: '', err: '<原因>' }＝在 thread 裡但反查不出單號——這種情況要讓使用者
-// 知道原因，最常見的是缺 channels:history scope。
+// 回傳 { j: '', ask: '', err: '<原因>' }＝在 thread 裡但反查不出歸屬——這種情況要
+// 讓使用者知道原因，最常見的是缺 channels:history scope。
 // 把失敗的參數記下來（覆蓋式，只留最後一筆），讓 diagnoseSlackAccess() 能用
 // 同一組 channel / thread_ts 重打一次 Slack API 並印出完整回應。否則使用者只
 // 看到「讀不到第一則訊息」，無從分辨是 scope 沒生效、token 沒更新，還是 Alice
@@ -38,8 +75,35 @@ function _routeFail_(channel, thread, err) {
   } catch (e) {
     // 記錄失敗不該影響主流程
   }
-  return { j: '', err: err };
+  return { kind: '', j: '', ask: '', err: err };
 }
+
+
+/**
+ * 取整串訊息（由舊到新，每則帶 bot 旗標）。
+ *
+ * 兩支 provider 介面都吃：fetchThreadTexts 是完整的那個（ask 串要看 Alice 自己
+ * 的看板才認得出來，那不會是第一則），fetchThreadRoot 只夠反查單號。
+ * SlackProvider 兩支都有，而且同一次執行內共用同一次 API 呼叫（見
+ * providers/slack.js 的 THREAD_FETCH_MEMO），所以先問哪一支都不會多打網路。
+ *
+ * 回傳 undefined＝這個 provider 沒有反查能力（googleChat 目前就是），
+ * null＝讀得到介面但讀不到內容（scope／token／網路）。兩者的下一步不同。
+ */
+function _threadMessages_(channel, thread, provider) {
+  if (provider && provider.fetchThreadTexts) {
+    return provider.fetchThreadTexts(channel, thread);
+  }
+  if (provider && provider.fetchThreadRoot) {
+    const root = provider.fetchThreadRoot(channel, thread);
+    if (root === null) return null;
+    // 只有第一則、而且一定不是 Alice 發的（bot 旗標要靠整串那支才拿得到），
+    // 所以這條路認得出任務串、認不出 ask 串。
+    return root ? [{ text: root, bot: false }] : [];
+  }
+  return undefined;
+}
+
 
 function _resolveRouteFromThread_(conv, provider) {
   const channel = conv && conv.channel;
@@ -49,24 +113,75 @@ function _resolveRouteFromThread_(conv, provider) {
   if (!channel || !thread) return null;
 
   const cache = CacheService.getScriptCache();
-  const ck = 'route_' + thread;
+  const ck = ROUTE_CACHE_PREFIX + thread;
   const hit = cache.get(ck);
-  if (hit) return { j: hit };
+  if (hit) {
+    return (hit.indexOf('a:') === 0)
+      ? { kind: 'ask',  j: '', ask: hit.slice(2) }
+      : { kind: 'jira', j: hit.slice(2), ask: '' };
+  }
 
-  if (!provider || !provider.fetchThreadRoot) return { j: '', err: 'no-provider' };
+  const msgs = _threadMessages_(channel, thread, provider);
+  if (msgs === undefined) return { kind: '', j: '', ask: '', err: 'no-provider' };
+  if (msgs === null) return _routeFail_(channel, thread, 'fetch-failed');   // scope／token／網路
+  if (!msgs.length) return _routeFail_(channel, thread, 'empty-root');      // 讀到了但沒訊息
 
-  const rootText = provider.fetchThreadRoot(channel, thread);
-  if (rootText === null) return _routeFail_(channel, thread, 'fetch-failed');  // scope／token／網路
-  if (!rootText) return _routeFail_(channel, thread, 'empty-root');            // 讀到了但沒文字
+  const root = String((msgs[0] && msgs[0].text) || '');
+  if (!root) return _routeFail_(channel, thread, 'empty-root');
 
-  const m = String(rootText).toUpperCase().match(JIRA_IN_TEXT_RE);
-  if (!m) {
-    console.log('thread 第一則訊息裡沒有單號：' + String(rootText).slice(0, 120));
+  const jiraHit = root.toUpperCase().match(JIRA_IN_TEXT_RE);
+  const jira = jiraHit ? jiraHit[1] : '';
+
+  // 只在「可能是 ask 串」時才掃整串找提問編號。三種可能，都判得出來：
+  //   ① 第一則就是看板 → 用 /ask 指令起頭的那種（沒有訊息可以掛，Alice 自己起串）
+  //   ② 第一則是 `@Alice ask …` → Alice 回在他那則底下，所以人那句是第一則
+  //   ③ 反查不到單號 → 按鈕送出的 ask（第一則是那句沒被規則接住的話）
+  // 反過來說，`@Alice ask …` 打在**決策 thread 裡**時三條都不成立（第一則是
+  // 受理訊息／卡片 summary），所以那串不會因為多了一則 ask 看板就變成 ask 串——
+  // 這正是要用「第一則」而不是「串裡有沒有」來判斷歸屬的原因。
+  const askRoot = ASK_ID_IN_TEXT_RE.test(root) || ASK_TRIGGER_IN_ROOT_RE.test(root);
+  if (askRoot || !jira) {
+    const askId = _scanAskId_(msgs);
+    if (askId) {
+      cache.put(ck, 'a:' + askId, ROUTE_CACHE_TTL);
+      return { kind: 'ask', j: '', ask: askId };
+    }
+    // 第一則就是 ask 的觸發句，但看板還沒推上來（Alice 的訊息此刻還是「正在查…」）。
+    // 歸屬不能等看板：`@Alice ask VIPOP-46703 的規格寫到哪` 的第一則帶著單號，
+    // 這時若退回去當任務串，那個判斷還會被快取六小時——整串從此把追問當成答覆。
+    // 所以照樣認定是 ask 串，只是沒有編號＝當新的一輪；而且**不快取**，
+    // 看板一到就接得起來。
+    if (askRoot) return { kind: 'ask', j: '', ask: '' };
+  }
+
+  if (!jira) {
+    console.log('thread 第一則訊息裡沒有單號：' + root.slice(0, 120));
     return _routeFail_(channel, thread, 'no-jira-in-root');
   }
 
-  cache.put(ck, m[1], ROUTE_CACHE_TTL);
-  return { j: m[1] };
+  cache.put(ck, 'j:' + jira, ROUTE_CACHE_TTL);
+  return { kind: 'jira', j: jira, ask: '' };
+}
+
+
+/**
+ * 從整串裡撈提問編號。
+ *
+ * ⚠️ 只認 Alice 自己發的訊息（bot 旗標）。提問編號會直接變成 git 分支名，人打的
+ *    字不該有那個權力——否則貼一段別人的編號就能把追問寫進別人的分支。
+ *
+ * ⚠️ 由舊到新取**第一個**命中的：那是開出這一串的那一輪，也就是這個 thread 真正
+ *    歸屬的分支。取最新的話，串裡任何一次「反查失敗而新開的輪次」都會把歸屬搶走，
+ *    於是同一串會在兩支分支之間跳。
+ */
+function _scanAskId_(msgs) {
+  for (let i = 0; i < msgs.length; i++) {
+    const m = msgs[i];
+    if (!m || !m.bot) continue;
+    const hit = String(m.text || '').match(ASK_ID_IN_TEXT_RE);
+    if (hit) return hit[1];
+  }
+  return '';
 }
 
 

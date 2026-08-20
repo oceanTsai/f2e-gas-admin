@@ -101,51 +101,19 @@ function _askAllowed_(rawText, conv, provider) {
 //     第二則。只讀第一則的話續問永遠接不起來——而它壞掉的樣子跟「功能沒做」
 //     一模一樣：每次都開新分支、agent 每次都反問「要重試什麼」。
 //
-//  ⚠️ 只認 Alice 自己發的訊息（bot 旗標）。提問編號會直接變成 git 分支名，
-//     人打的字不該有那個權力——否則貼一段別人的編號就能把追問寫進別人的分支。
-//
-//  ⚠️ 由舊到新取**第一個**命中的：那是開出這一串的那一輪，也就是這個 thread
-//     真正歸屬的分支。取最新的話，串裡任何一次「反查失敗而新開的輪次」都會把
-//     歸屬搶走，於是同一串會在兩支分支之間跳。
-//
 //  ⚠️ 反查失敗一律回空字串＝開新的一輪，**絕不因此擋下提問**。
 //     沒有上文的答案仍然有用；擋下來他就什麼都沒有。
 //
-//  ⚠️ 只快取命中的結果。第一輪的看板此刻可能還沒推上來（Alice 的訊息還是
-//     「正在查…」），快取了那次的 miss 會讓這個 thread 從此再也接不起來。
+//  ⚠️ 反查本身住在 core/decision.js 的 `_resolveRouteFromThread_`——那一支同時
+//     決定「這串是任務串還是 ask 串」。兩件事必須由**同一個**函式決定、共用同一份
+//     快取，否則同一串的歸屬會在兩次 HTTP 請求之間跳（理由與實測踩到的形狀寫在
+//     decision.js 的開頭）。這裡只取它的結論，其餘規則（只認 bot 訊息、由舊到新
+//     取第一個命中）都在那邊。
 // ═══════════════════════════════════════════════════════════════════
 
-// 樣式要夠緊，否則會把別的 thread 認成 ask thread。JIRA 單號（VIPOP-46703）
-// 與這條無交集：這裡要求 `-8位數-6位數` 兩段。
-const ASK_ID_IN_TEXT_RE = /([A-Za-z0-9]+-[0-9]{8}-[0-9]{6})/;
-const ASK_ROUTE_CACHE_TTL = 21600;   // 6 小時，CacheService 上限
-
 function _resolveAskIdFromThread_(conv, provider) {
-  const channel = conv && conv.channel;
-  const thread = conv && conv.thread;
-  // 不在 thread 裡＝在頻道直接問＝一定是新的一輪，連 API 都不必打
-  if (!channel || !thread) return '';
-
-  const cache = CacheService.getScriptCache();
-  const ck = 'askid_' + thread;
-  const hit = cache.get(ck);
-  if (hit) return hit;
-
-  if (!provider || !provider.fetchThreadTexts) return '';
-
-  // null＝讀不到（scope／token／網路）。當新的一輪。
-  const msgs = provider.fetchThreadTexts(channel, thread);
-  if (!msgs || !msgs.length) return '';
-
-  for (let i = 0; i < msgs.length; i++) {
-    const m = msgs[i];
-    if (!m || !m.bot) continue;
-    const hit = String(m.text || '').match(ASK_ID_IN_TEXT_RE);
-    if (!hit) continue;
-    cache.put(ck, hit[1], ASK_ROUTE_CACHE_TTL);
-    return hit[1];
-  }
-  return '';
+  const route = _resolveRouteFromThread_(conv, provider);
+  return (route && route.ask) ? route.ask : '';
 }
 
 

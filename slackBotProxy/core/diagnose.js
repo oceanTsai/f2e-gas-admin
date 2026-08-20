@@ -108,7 +108,7 @@ function diagnoseSlackAccess() {
 }
 
 
-/** 清掉 thread → 單號 的反查快取（scope 修好後用，免得等 6 小時）。 */
+/** 清掉 thread → 歸屬 的反查快取（scope 修好後用，免得等 6 小時）。 */
 function clearRouteCache() {
   // CacheService 沒有「列出所有 key」的 API，所以只能清掉有紀錄的那一筆。
   // 這也夠用了——診斷情境下就是那個 thread 反查失敗。
@@ -119,8 +119,11 @@ function clearRouteCache() {
   }
   try {
     const fail = JSON.parse(raw);
-    CacheService.getScriptCache().remove('route_' + fail.ts);
-    console.log('已清掉 route_' + fail.ts + ' 的快取，回 Slack 再試一次。');
+    // 鍵名由 decision.js 定義（ROUTE_CACHE_PREFIX）。寫死字串的話，
+    // 那邊換鍵時這支會靜默地清一個不存在的鍵——看起來成功、實際沒清到。
+    const key = ROUTE_CACHE_PREFIX + fail.ts;
+    CacheService.getScriptCache().remove(key);
+    console.log('已清掉 ' + key + ' 的快取，回 Slack 再試一次。');
   } catch (err) {
     console.error('清快取失敗:', err);
   }

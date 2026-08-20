@@ -23,11 +23,12 @@
 //  意圖層掛掉時系統還能用，熟練使用者打指令也更快。
 // ═══════════════════════════════════════════════════════════════════
 
-const JIRA_KEY_RE = /\b([A-Z][A-Z0-9]+-\d+)\b/;
-
-
+// 單號樣式只留一份，在 core/decision.js（JIRA_IN_TEXT_RE）。這裡曾經有一份
+// 一模一樣的複本，而複本的代價是實測出來的：那邊補上「不可以是 ask 提問編號的
+// 前綴」的斷言時，這邊不會跟著改，於是「thread 反查」與「句子裡撈單號」對同一
+// 串字會給出不同答案——而那種不一致只會在某一條路徑上發作，很難查。
 function _extractJiraKey_(text) {
-  const m = (text || '').toUpperCase().match(JIRA_KEY_RE);
+  const m = (text || '').toUpperCase().match(JIRA_IN_TEXT_RE);
   return m ? m[1] : '';
 }
 
@@ -37,9 +38,10 @@ function _extractJiraKey_(text) {
  *
  * 回傳的意圖契約（每個分類器都必須回這個形狀）：
  *   {
- *     action,       // empty | answer_question | run_ra | run_sa | run_full | status | unknown
+ *     action,       // empty | answer_question | ask_followup | run_ra | run_sa |
+ *                   // run_full | status | unknown
  *     jiraId,
- *     answerText,   // action = answer_question 時的原句
+ *     answerText,   // action = answer_question / ask_followup 時的原句
  *     items,        // 正規化後的答案 [{ qid, answerText }]。
  *                   // 規則層一律 null＝「我沒解析，交給下游」。
  *                   // 放在意圖契約裡而不是純粹留給下游，是因為 LLM 版可以
@@ -71,6 +73,10 @@ function _buildIntentCtx_(text, conv, provider) {
     raw: raw,
     jiraInText: _extractJiraKey_(raw),
     route: route,
+    // 「這一串是 ask 串」是分類器唯一需要知道的事——續問要接哪一支分支由
+    // handleAskRequest 自己反查（同一份快取，不會多打 API）。分類器拿不到
+    // 編號也不需要：它只決定走哪一條路。
+    askThread: !!(route && route.kind === 'ask'),
     // thunk 而不是值：它背後是 fetchProgress（一次網路呼叫）。規則層完全不需要
     // 它，不該為了統一介面就每次都付那個成本。
     getPending: function () {
@@ -121,6 +127,13 @@ function routeByIntent(text, conv, userId, provider) {
         jiraId: intent.jiraId,
         items: intent.items
       });
+      return;
+
+    case 'ask_followup':
+      // ask 串裡的任何一句都是追問。不經過 _askAllowed_ 的密語判斷是刻意的：
+      // handleAskRequest 自己會做，而它套用的是同一條豁免（這串受理過就不再
+      // 要密語）——在這裡先判一次只會多打一次反查，還可能給出不一致的答案。
+      handleAskRequest(intent.answerText, conv, userId, provider);
       return;
 
     case 'run_ra':
