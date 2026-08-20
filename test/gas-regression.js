@@ -105,13 +105,55 @@ console.log('[0] GAS 全域 scope — 專案內所有檔案能否共存');
     const blob = files.map(f => fs.readFileSync(f, 'utf8')).join(String.fromCharCode(10));
     new vm.Script(blob, { filename: proj + ' (concatenated)' });   // 只解析，不執行
 
+    // 掃描前先去掉註解。不去的話，光是在註解裡提到 `_foo_()` 就會被算成呼叫，
+    // 而這份 codebase 的註解密度很高——那種誤報會讓人開始忽略這條檢查。
+    //
+    // ⚠️ 用**逐行**狀態機，不要用 /\*[\s\S]*?\*\/ 那種跨行 regex：程式碼裡的
+    //    regex literal 會誤觸（某個 pattern 裡的 `*` 加上結尾的 `/` 剛好組成
+    //    `*/`），一吃就吃掉幾十 KB 的程式碼，然後所有真的定義都「消失」了。
+    //    這份 codebase 的區塊註解一律獨占整行，逐行判斷就夠且不會誤傷。
+    const NL = String.fromCharCode(10);
+    let inBlock = false;
+    const code = blob.split(NL).map(function (line) {
+      if (inBlock) {
+        if (line.indexOf('*/') >= 0) inBlock = false;
+        return '';
+      }
+      if (/^\s*\/\*/.test(line)) {
+        if (line.indexOf('*/') < 0) inBlock = true;
+        return '';
+      }
+      // `://` 要保護，否則 URL 會被當成行註解而吃掉整行（可能藏著真的呼叫）
+      return line.replace(/(^|[^:])\/\/.*$/, '$1');
+    }).join(NL);
+
     const seen = {};
     let m;
     DECL.lastIndex = 0;
-    while ((m = DECL.exec(blob)) !== null) seen[m[1]] = (seen[m[1]] || 0) + 1;
+    while ((m = DECL.exec(code)) !== null) seen[m[1]] = (seen[m[1]] || 0) + 1;
     const dup = Object.keys(seen).filter(k => seen[k] > 1);
     assert.strictEqual(dup.length, 0,
       proj + ' 有重複的頂層宣告（GAS 會拒絕載入）: ' + dup.join(', '));
+
+    // 被呼叫但沒有定義的內部輔助函式。
+    //
+    // 這條是實戰換來的：入向／出向拆分（ae4d37a）把 `_emptyResponse_()` 的定義
+    // 連帶刪掉，但 handleInteraction 裡九個呼叫點全部留著。GAS 不會在載入時
+    // 抱怨——ReferenceError 要等真的執行到那一行才發生，而那一行只有「有人按了
+    // 卡片按鈕」時才會跑到。症狀還是破壞性的：doPost 的 catch 回一段純文字，
+    // Slack 拿它把整張卡片換掉，其他題的按鈕一起消失。
+    //
+    // 只掃 `_xxx_()` 這種本專案的內部命名慣例——GAS 內建服務（ContentService…）
+    // 與 provider 物件的方法不在此列，那些掃了只會是誤報。
+    const CALLED = /(?<![.\w$])(_[A-Za-z]\w*_)\s*\(/g;
+    const missing = new Set();
+    let cm;
+    CALLED.lastIndex = 0;
+    while ((cm = CALLED.exec(code)) !== null) {
+      if (!seen[cm[1]]) missing.add(cm[1]);
+    }
+    assert.strictEqual(missing.size, 0,
+      proj + ' 呼叫了未定義的內部函式（執行到那一行才會炸）: ' + [...missing].join(', '));
 
     // Script Properties 的 key 必須在白名單裡。
     //

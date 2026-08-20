@@ -239,6 +239,20 @@ function _answerAmbiguousText_(user, jiraId, pending) {
 }
 
 
+// 互動回應必須是空 body：Slack 會把任何非空回應當成「替換原訊息」的內容，
+// 一旦回傳純文字，整張卡片（含按鈕）就會被那行字取代——問題還沒回答，按鈕卻永久消失。
+// 所有要給使用者看的提示，一律走 response_url 的 ephemeral 訊息。
+//
+// ⚠️ 這支曾經在入向／出向拆分（ae4d37a）時被連帶刪掉，但 handleInteraction 裡
+//    九個呼叫點全部留著。症狀不是靜默的、而是破壞性的：每次點按鈕都會拋
+//    ReferenceError，doPost 的 catch 回一段純文字錯誤訊息，Slack 拿它把整張
+//    卡片換掉——答案其實已經寫進去了，但那張卡片連同其他題的按鈕一起消失。
+//    現在 test/gas-regression.js 的 [0] 節會檢查所有 `_xxx_()` 呼叫都有定義。
+function _emptyResponse_() {
+  return ContentService.createTextOutput('');
+}
+
+
 function handleInteraction(payload, provider, key) {
   // 金鑰驗證：與 decision 請求同一把 NOTIFY_KEY（Slack 的 Interactivity URL 可帶 query param）
   const notifyKey = PropertiesService.getScriptProperties().getProperty('NOTIFY_KEY');
