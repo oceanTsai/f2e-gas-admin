@@ -137,6 +137,10 @@ function _routeSlashCommand_(e, provider) {
       handleTextAnswer(text, conv, user, provider);
       return ContentService.createTextOutput('📝 已收到你的答覆，正在處理…');
 
+    case '/ask':
+      handleAskRequest(text, conv, user, provider);
+      return ContentService.createTextOutput('🔍 收到，正在查…');
+
     case '/coding':
       provider.postMessage(channel, `<@${user}> ✅ coding 任務已收到\n參數：\`${text || '(無)'}\``);
       return ContentService.createTextOutput('🚀 收到，coding 處理中…');
@@ -186,6 +190,12 @@ function _routeMentionEvent_(event, provider) {
     case 'answer':
     case 'ans':
       handleTextAnswer(args, conv, event.user, provider);
+      break;
+
+    // 自由提問。與 ra / sa / answer 同一層級，不經過意圖分類——
+    // 意圖層掛掉時它還能用，熟手直接打也更快。
+    case 'ask':
+      handleAskRequest(args, conv, event.user, provider);
       break;
 
     case 'coding':

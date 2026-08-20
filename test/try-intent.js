@@ -14,6 +14,7 @@
 const fs = require('fs');
 const path = require('path');
 const ROOT = path.join(__dirname, '..');
+let uuidSeq = 0;   // Utilities.getUuid 的可預期替身（測試要能對照快取鍵）
 
 const argv = process.argv.slice(2);
 let threadJira = null;
@@ -43,7 +44,7 @@ Object.assign(global, {
   })},
   LockService: { getScriptLock: () => ({ tryLock: () => true, releaseLock() {} }) },
   ContentService: { createTextOutput: t => ({ _t: t, setMimeType() { return this; } }), MimeType: { JSON: 'json' } },
-  Utilities: { formatDate: () => '12:00:00' },
+  Utilities: { formatDate: () => '12:00:00', getUuid: () => 'uuid-' + (uuidSeq++) },
   UrlFetchApp: { fetch: () => { throw new Error('試打模式不該打網路'); } },
 });
 

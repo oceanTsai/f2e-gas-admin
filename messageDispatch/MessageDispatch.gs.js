@@ -33,7 +33,7 @@ function doPost(e) {
     // 都接受：notify-question.sh 走 body，早期版本走 query string。
     const action = (e && e.parameter && e.parameter.action) || body.action;
     if (!action) {
-      return _json_({ error: 'Missing action（預期 decision / progress / answer_result）' });
+      return _json_({ error: 'Missing action（預期 decision / progress / answer_result / ask_result）' });
     }
 
     const provider = getProvider();
@@ -49,6 +49,10 @@ function doPost(e) {
       // 有資訊的那則只能由 augma 在寫完之後發（見 core/outbound.js 的說明）。
       case 'answer_result':
         return handleAnswerResult(body, key, provider);
+
+      // 自由提問的答案。與 pipeline 無關：ask 沒有下游、不碰任何 JIRA 單。
+      case 'ask_result':
+        return handleAskResult(body, key, provider);
 
       default:
         return _json_({ error: 'Unknown action: ' + action });

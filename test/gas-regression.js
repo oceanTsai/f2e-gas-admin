@@ -17,6 +17,7 @@ const path = require('path');
 const assert = require('assert');
 
 const ROOT = path.join(__dirname, '..');
+let uuidSeq = 0;   // Utilities.getUuid 的可預期替身（測試要能對照快取鍵）
 let passed = 0;
 function ok(msg) { passed++; console.log('  ✓ ' + msg); }
 
@@ -42,7 +43,7 @@ function mkEnv(seedProps) {
         createTextOutput: t => ({ _t: t, setMimeType() { return this; } }),
         MimeType: { JSON: 'json' },
       },
-      Utilities: { formatDate: () => '12:00:00' },
+      Utilities: { formatDate: () => '12:00:00', getUuid: () => 'uuid-' + (uuidSeq++) },
       UrlFetchApp: { fetch: () => { throw new Error('測試不該打真的網路'); } },
       console: console,
     }
@@ -60,6 +61,7 @@ const INTENT_SRC = [
   'slackBotProxy/core/github.js',
   'slackBotProxy/core/decision.js',
   'slackBotProxy/core/answer.js',
+  'slackBotProxy/core/ask.js',
   'slackBotProxy/core/classifiers/rules.js',
   'slackBotProxy/core/classifiers/index.js',
   'slackBotProxy/core/intent.js',
@@ -731,6 +733,180 @@ console.log('\n[3d] slackBotProxy — 批次派發與去重（與按鈕共用同
 
 
 // ══════════════════════════════════════════════════════════════════
+console.log('\n[3e] slackBotProxy — 自由提問（ask）');
+// 這條路刻意不經過意圖分類，也刻意不是 catch-all：規則層分不出「這是給 agent
+// 的任務」與「這是人在聊天」，自動放行等於閒聊也燒一個 runner。
+// ══════════════════════════════════════════════════════════════════
+{
+  const env = mkEnv();
+  Object.assign(global, env.globals);
+  const posted = [], dispatched = [];
+  let dispatchOk = true;
+  const provider = {
+    name: 'slack',
+    fetchThreadRoot: () => '',
+    postMessage: (ch, text) => { posted.push(text); return { ts: '1700.9' }; },
+    postAccepted: (conv, text) => {
+      posted.push(text);
+      return { provider:'slack', channel: conv.channel, thread: conv.thread || '1700.9', status_ts: '1700.9' };
+    },
+  };
+
+  eval(src(INTENT_SRC) + `
+  dispatchAsk = function (prompt, uid, conv) {
+    dispatched.push({ prompt: prompt, uid: uid, conv: conv });
+    return dispatchOk;
+  };
+
+  const CH = { provider:'slack', channel:'C1', thread:null };
+
+  posted.length = 0; dispatched.length = 0;
+  handleAskRequest('', CH, 'U1', provider);
+  assert.strictEqual(dispatched.length, 0);
+  assert.ok(posted.some(t => t.indexOf('要問什麼') >= 0));
+  ok('空提問 → 給用法，不 dispatch');
+
+  posted.length = 0; dispatched.length = 0;
+  handleAskRequest('X'.repeat(2500), CH, 'U1', provider);
+  assert.strictEqual(dispatched.length, 0);
+  assert.ok(posted.some(t => t.indexOf('太長') >= 0));
+  ok('超長提問 → 擋下（多半是貼錯整份 log，讓 agent 讀八分鐘沒有意義）');
+
+  posted.length = 0; dispatched.length = 0;
+  handleAskRequest('幫我查 ui 的 code 裡登入流程怎麼寫的', CH, 'U1', provider);
+  assert.strictEqual(dispatched.length, 1);
+  assert.ok(dispatched[0].prompt.indexOf('登入流程') >= 0);
+  assert.ok(posted.some(t => t.indexOf('正在查') >= 0));
+  ok('正常提問 → 先貼受理訊息取得 thread 錨點，再 dispatch');
+
+  // 答案是幾分鐘後由 augma 主動貼回來的，那時已經沒有任何 Slack 事件
+  // 可以推導「要回到哪裡」，所以 conversation 必須在 dispatch 當下就定案
+  assert.strictEqual(dispatched[0].conv.channel, 'C1');
+  assert.strictEqual(dispatched[0].conv.thread, '1700.9', '在頻道裡問時要用受理訊息當 thread 錨點');
+  ok('conversation 錨點在 dispatch 前定案（答案回得來、且不洗頻）');
+
+  posted.length = 0; dispatched.length = 0;
+  handleAskRequest('再問一題', CH, 'U1', provider);
+  assert.strictEqual(dispatched.length, 0);
+  assert.ok(posted.some(t => t.indexOf('剛剛才問過') >= 0));
+  ok('同一人 60 秒內再問 → 節流（每題佔一台 runner）');
+
+  // 節流是 per-user：別人不該被連坐
+  posted.length = 0; dispatched.length = 0;
+  handleAskRequest('我也想問', CH, 'U2', provider);
+  assert.strictEqual(dispatched.length, 1);
+  ok('節流是 per-user，不會連坐其他人');
+
+  // dispatch 失敗時不可留下節流標記——那會讓他連重試都被擋住
+  CacheService.getScriptCache().remove('ask_U3');
+  dispatchOk = false;
+  posted.length = 0; dispatched.length = 0;
+  handleAskRequest('會失敗的一題', CH, 'U3', provider);
+  assert.ok(posted.some(t => t.indexOf('觸發 GitHub Actions 失敗') >= 0));
+  assert.strictEqual(CacheService.getScriptCache().get('ask_U3'), null,
+    'dispatch 失敗不該寫節流標記，否則他連重試都被擋住');
+  dispatchOk = true;
+  posted.length = 0; dispatched.length = 0;
+  handleAskRequest('重試', CH, 'U3', provider);
+  assert.strictEqual(dispatched.length, 1);
+  ok('dispatch 失敗 → 不寫節流標記，可立刻重試');
+
+  // ask 與意圖分類是兩條獨立的路：意圖層掛掉時 ask 還能用
+  assert.strictEqual(classifyIntent('幫我查ui的code', { channel:'C9', thread:null }, provider).matchedBy, 'no-match');
+  ok('同一句話在意圖層仍是 no-match —— ask 刻意不是 catch-all');
+  `);
+}
+
+
+// ══════════════════════════════════════════════════════════════════
+console.log('\n[3f] slackBotProxy — 反問時的「當成一般提問送出」按鈕');
+// 保留「規則接不住就反問，不猜」這個原則，同時讓那個能力離一次點擊。
+// ══════════════════════════════════════════════════════════════════
+{
+  const env = mkEnv();
+  Object.assign(global, env.globals);
+  const posted = [], dispatched = [], transient = [];
+  const provider = {
+    name: 'slack',
+    fetchThreadRoot: () => '',
+    postMessage: (ch, text, thread, blocks) => { posted.push({ text: text, blocks: blocks }); return { ts: '1700.9' }; },
+    postAccepted: (conv, text) => { posted.push({ text: text, blocks: null });
+      return { provider:'slack', channel: conv.channel, thread: '1700.9', status_ts: '1700.9' }; },
+    notifyTransient: (i, t) => { transient.push(t); },
+    parseInteraction: (p) => p,
+  };
+
+  // 這一節要驗 parseInteraction 的相容性，所以連 provider 一起載入
+  eval(src(INTENT_SRC.concat(['slackBotProxy/providers/slack.js'])) + `
+  dispatchAsk = function (prompt, uid, conv) { dispatched.push(prompt); return true; };
+
+  const OUT = { provider:'slack', channel:'C9', thread:null };
+  const findBtn = () => {
+    for (const p of posted) {
+      const b = (p.blocks || []).find(x => x.type === 'actions');
+      if (b) return JSON.parse(b.elements[0].value);
+    }
+    return null;
+  };
+
+  // 真的沒聽懂 → 給按鈕
+  posted.length = 0;
+  routeByIntent('幫我查ui的code', OUT, 'U1', provider);
+  const btn = findBtn();
+  assert.ok(btn, 'no-match 時要附上按鈕');
+  assert.strictEqual(btn.kind, 'ask_confirm');
+  assert.ok(btn.k && btn.k.indexOf('askq_') === 0, 'value 只放快取鍵');
+  assert.ok(JSON.stringify(btn).length < 2000, 'Slack 按鈕 value 上限 2000 字元');
+  ok('no-match → 反問訊息附「當成一般提問送出」按鈕（value 只放快取鍵）');
+
+  // 有更具體下一步的 unknown 不給按鈕：補上缺的那半就能跑對的流程，
+  // 丟給通用 agent 只會得到一個比較差的答案
+  posted.length = 0;
+  routeByIntent('幫我RA流程', OUT, 'U1', provider);
+  assert.strictEqual(findBtn(), null, 'verb-no-jira 有更好的下一步，不該給按鈕');
+  posted.length = 0;
+  routeByIntent('VIPOP-12345', OUT, 'U1', provider);
+  assert.strictEqual(findBtn(), null, 'jira-no-verb 同理');
+  ok('verb-no-jira / jira-no-verb 不給按鈕（反問本身就是更好的下一步）');
+
+  // 按下去 → 走與 @Alice ask 完全相同的入口
+  posted.length = 0; dispatched.length = 0;
+  routeByIntent('幫我查ui的code', OUT, 'U2', provider);
+  const btn2 = findBtn();
+  const click = { kind:'ask_confirm', askKey: btn2.k, userId:'U2', user:'<@U2>',
+                  conversation:{ provider:'slack', channel:'C9', thread:null } };
+  handleInteraction(click, provider, null);
+  assert.strictEqual(dispatched.length, 1);
+  assert.strictEqual(dispatched[0], '幫我查ui的code', '要送出原句，不是按鈕的文字');
+  ok('按下按鈕 → 用原句走 handleAskRequest（與 @Alice ask 同一條路）');
+
+  // 連點兩下不該送兩次——那是再燒一台 runner
+  transient.length = 0; dispatched.length = 0;
+  handleInteraction(click, provider, null);
+  assert.strictEqual(dispatched.length, 0);
+  assert.ok(transient.some(t => t.indexOf('送出過') >= 0));
+  ok('連點第二下 → 擋下（先刪快取再送，所以第二次讀不到）');
+
+  // 快取過期（TTL 15 分鐘）
+  transient.length = 0; dispatched.length = 0;
+  handleInteraction({ kind:'ask_confirm', askKey:'askq_不存在', userId:'U2',
+                      conversation:{ channel:'C9', thread:null } }, provider, null);
+  assert.strictEqual(dispatched.length, 0);
+  assert.ok(transient.some(t => t.indexOf('15 分鐘') >= 0));
+  ok('快取過期 → 請他重講一次，不送出一句他早就忘了的話');
+
+  // 舊卡片的 value 裡沒有 kind，必須仍被當成決策按鈕
+  const legacy = SlackProvider.parseInteraction({
+    actions: [{ value: JSON.stringify({ question_id:'Q-001', choice:'A', jira_id:'VIPOP-1' }) }],
+    user: { id:'U1' }, channel: { id:'C1' }, message: { ts:'1.1' }
+  });
+  assert.strictEqual(legacy.kind, 'decision', '沒有 kind 的舊卡片要退回 decision');
+  ok('舊卡片（value 無 kind）仍走決策路徑——那些卡片可能已躺在 thread 裡好幾天');
+  `);
+}
+
+
+// ══════════════════════════════════════════════════════════════════
 console.log();
 console.log('[3b] slackBotProxy — 收到出向請求要明確報錯，不能靜默回 ok');
 // 拆分後若 AUGMA_NOTIFY_ENDPOINT 還指向這支，回純文字 'ok'（HTTP 200）會讓
@@ -833,6 +1009,49 @@ console.log('\n[4] messageDispatch — 出向路由與金鑰驗證');
   })}});
   assert.ok(outCalls.join('').indexOf('沒有寫入任何一題') >= 0);
   ok('一題都沒寫進去 → 明講，不沉默');
+
+  // 自由提問的答案
+  outCalls.length = 0;
+  doPost({ parameter:{ k:'secret' }, postData:{ contents: JSON.stringify({
+    action:'ask_result', ask_id:'U1-20260820-143000',
+    conversation:{ channel:'C1', thread:'1700.1' },
+    answer:'登入流程在 src/auth/login.ts:42（OAuth2 授權碼流程）。', status:'completed', truncated:false
+  })}});
+  assert.ok(outCalls.join('').indexOf('src/auth/login.ts:42') >= 0);
+  ok('ask_result → 答案原樣貼回 thread');
+
+  // 沒答案時**一定要**發訊息：人收到的最後一則是「已收到，正在查」，
+  // 沉默會讓他一直等，然後再問一次——又燒一次 runner。
+  outCalls.length = 0;
+  doPost({ parameter:{ k:'secret' }, postData:{ contents: JSON.stringify({
+    action:'ask_result', ask_id:'U1-x', conversation:{ channel:'C1' },
+    answer:'', status:'failed', error:'agent 逾時', run_url:'https://x/runs/1'
+  })}});
+  let am = outCalls.join(String.fromCharCode(10));
+  assert.ok(am.indexOf('沒能回答') >= 0, '沒有答案也必須明講，不能沉默');
+  assert.ok(am.indexOf('agent 逾時') >= 0, '有錯誤訊息就要帶出來');
+  assert.ok(am.indexOf('runs/1') >= 0, '要給執行記錄連結');
+  ok('ask_result 無答案 → 明講失敗 ＋ 原因 ＋ 執行記錄（不沉默）');
+
+  // 逾時與「出錯」的下一步不同，訊息要分得開
+  outCalls.length = 0;
+  doPost({ parameter:{ k:'secret' }, postData:{ contents: JSON.stringify({
+    action:'ask_result', ask_id:'U1-y', conversation:{ channel:'C1' },
+    answer:'', status:'unknown'
+  })}});
+  assert.ok(outCalls.join('').indexOf('換個更具體的問法') >= 0);
+  ok('無答案且無錯誤 → 給可行動的建議，而不是只說失敗');
+
+  // 截斷時要說清楚完整版在哪，以及那個位置會過期
+  outCalls.length = 0;
+  doPost({ parameter:{ k:'secret' }, postData:{ contents: JSON.stringify({
+    action:'ask_result', ask_id:'U1-z', conversation:{ channel:'C1' },
+    answer:'很長的答案', status:'completed', truncated:true
+  })}});
+  am = outCalls.join('');
+  assert.ok(am.indexOf('ask/U1-z') >= 0 && am.indexOf('三天') >= 0,
+    '截斷時要指出完整版在哪支分支，並說明它會被清掉');
+  ok('ask_result 截斷 → 指出分支位置與保留期限');
 
   assert.ok(doPost({ parameter:{ k:'secret', action:'nope' } })._t.indexOf('Unknown action') >= 0);
   assert.ok(doGet()._t.indexOf('outbound') >= 0);

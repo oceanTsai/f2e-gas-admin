@@ -163,3 +163,54 @@ function handleAnswerResult(body, key, provider) {
   return ContentService.createTextOutput(JSON.stringify({ status: 'ok' }))
     .setMimeType(ContentService.MimeType.JSON);
 }
+
+
+// ═══════════════════════════════════════════════════════════════════
+//  自由提問的答案（由 augma 的 notify-ask-result.sh 呼叫）
+//
+//  ⚠️ 這支必須對「沒有答案」也發訊息。呼叫端是 `if: always()`，因為人在 Slack
+//     收到的最後一則是「已收到，正在查」——沉默的話他會一直等，然後再問一次，
+//     又燒一次 runner。所以 agent 掛掉、逾時、沒寫出檔案，這裡都要講出來。
+// ═══════════════════════════════════════════════════════════════════
+
+function handleAskResult(body, key, provider) {
+  const notifyKey = PropertiesService.getScriptProperties().getProperty('NOTIFY_KEY');
+  if (notifyKey && key !== notifyKey) {
+    return ContentService.createTextOutput(JSON.stringify({ error: 'Unauthorized: invalid notify key' }))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+
+  const conv = body.conversation || {};
+  if (!conv.channel && !conv.space) {
+    return ContentService.createTextOutput(JSON.stringify({ error: 'Missing channel or space' }))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+
+  const answer = String(body.answer || '').trim();
+  const lines = [];
+
+  if (answer) {
+    lines.push(answer);
+    if (body.truncated) {
+      lines.push('');
+      lines.push('_（答案過長已截斷。完整內容在分支 `ask/' + (body.ask_id || '') + '` 的 `workspace/ask-outputs/answer.md`，保留三天。）_');
+    }
+  } else {
+    // 沒有答案時要分辨原因——兩種的下一步完全不同
+    const failed = (body.status === 'failed') || !!body.error;
+    lines.push(failed
+      ? '⚠️ 這次沒能回答，過程中出錯了。'
+      : '⚠️ 這次沒能回答（可能是逾時，或問題太發散）。換個更具體的問法再試一次通常有效。');
+    if (body.error) {
+      lines.push('```' + String(body.error).slice(0, 300) + '```');
+    }
+    if (body.run_url) {
+      lines.push('<' + body.run_url + '|執行記錄>');
+    }
+  }
+
+  provider.postMessage(conv.channel, lines.join('\u000a'), conv.thread || conv.thread_ts || null);
+
+  return ContentService.createTextOutput(JSON.stringify({ status: 'ok' }))
+    .setMimeType(ContentService.MimeType.JSON);
+}

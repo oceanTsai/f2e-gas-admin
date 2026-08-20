@@ -65,6 +65,27 @@ function dispatchResumeBatch(jiraId, pipeline, rawText, user) {
   return dispatchWorkflow(payload);
 }
 
+// 自由提問。與 pipeline 完全無關：ask-workflow.yml 沒有下游、不碰任何 JIRA 單的
+// progress.json，它只是借用同一套 Phase 機制（那套的收工邏輯依賴 progress.json
+// 的結算狀態，不借用就得自己重寫一份殺 agent 的邏輯）。
+//
+// conversation 必須在這裡就定案：答案是幾分鐘後由 augma 主動貼回來的，
+// 那時已經沒有任何 Slack 事件可以推導出「要回到哪裡」。
+function dispatchAsk(prompt, userId, conversation) {
+  const payload = {
+    event_type: 'ask',
+    client_payload: {
+      prompt: prompt,
+      // 只用來組分支名（ask/<uid>-<timestamp>），所以送 id 而不是顯示名——
+      // 顯示名可能含點或中文，那些在 git ref 裡是雷。
+      user_id: String(userId || 'unknown').replace(/[^A-Za-z0-9]/g, ''),
+      conversation: conversation
+    }
+  };
+
+  return dispatchWorkflow(payload);
+}
+
 function dispatchWorkflow(payload) {
   const githubToken = PropertiesService.getScriptProperties().getProperty('GITHUB_TOKEN');
   if (!githubToken) {

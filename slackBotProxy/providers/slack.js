@@ -119,6 +119,11 @@ const SlackProvider = {
     const threadTs = (payload.message && payload.message.thread_ts) || messageTs;
 
     return {
+      // 以前只有一種按鈕，靠 question_id 就能判斷。多了「當成一般提問送出」
+      // 之後必須明講種類——沒有預設值的話，舊卡片（value 裡沒有 kind）會被
+      // 判成未知種類而整個失效，而那些卡片可能已經在 thread 裡躺了好幾天。
+      kind: actionData.kind || 'decision',
+      askKey: actionData.k || null,
       questionId: actionData.question_id,
       choice: actionData.choice,
       jiraId: actionData.jira_id,

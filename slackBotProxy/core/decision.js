@@ -253,6 +253,27 @@ function _emptyResponse_() {
 }
 
 
+// 3 秒預算內只做兩件事：讀回原句、走與 `@Alice ask` 完全相同的入口。
+// 共用 handleAskRequest 是刻意的——節流、長度檢查、受理訊息、dispatch 全部
+// 一致，這顆按鈕只是換一個觸發方式，不是第二條路。
+function _handleAskConfirm_(interaction, provider) {
+  const cache = CacheService.getScriptCache();
+  const raw = interaction.askKey ? cache.get(interaction.askKey) : null;
+
+  if (!raw) {
+    // 過期或已經按過。兩者都不該重送——重送一次就是再燒一台 runner。
+    provider.notifyTransient(interaction,
+      'ℹ️ 這個提問已經送出過，或已超過 15 分鐘。要再問請直接說一次。');
+    return _emptyResponse_();
+  }
+  // 先刪再送：連點兩下時第二次會落到上面那個分支
+  cache.remove(interaction.askKey);
+
+  handleAskRequest(raw, interaction.conversation, interaction.userId || interaction.user, provider);
+  return _emptyResponse_();
+}
+
+
 function handleInteraction(payload, provider, key) {
   // 金鑰驗證：與 decision 請求同一把 NOTIFY_KEY（Slack 的 Interactivity URL 可帶 query param）
   const notifyKey = PropertiesService.getScriptProperties().getProperty('NOTIFY_KEY');
@@ -264,6 +285,13 @@ function handleInteraction(payload, provider, key) {
   const interaction = provider.parseInteraction(payload);
   if (!interaction) {
     return _emptyResponse_();
+  }
+
+  // 「當成一般提問送出」——必須在所有決策邏輯之前分岔。
+  // 下面整段（去重鍵、讀 progress.json、改卡片）都假設這是決策按鈕，
+  // 讓它流過去的話會拿 undefined 去組快取鍵、然後靜默地什麼都不做。
+  if (interaction.kind === 'ask_confirm') {
+    return _handleAskConfirm_(interaction, provider);
   }
 
   const questionId = interaction.questionId;

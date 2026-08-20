@@ -139,9 +139,47 @@ function routeByIntent(text, conv, userId, provider) {
       handleStatusQuery(intent.jiraId, conv, userId, provider);
       return;
 
-    default:
-      provider.postMessage(conv.channel, _intentHelpText_(userId, intent), conv.thread);
+    default: {
+      // 規則真的沒聽懂時，多給一顆「當成一般提問送出」的按鈕。
+      //
+      // 為什麼是按鈕而不是自動放行：規則層分不出「這是給 agent 的任務」與
+      // 「這是人在聊天」——`幫我查ui的code` 與 `今天天氣真好` 的分類結果完全
+      // 一樣（都是 no-match）。自動放行等於閒聊也燒掉一個 runner。
+      // 按鈕保留了「不猜」這個原則，同時讓那個能力離一次點擊。
+      //
+      // 只在 no-match 時給。其餘的 unknown 都有更具體的下一步：
+      //   jira-no-verb / verb-no-jira → 反問缺的那一半，補上就能跑對的流程
+      //   route-failed                → 那是缺 scope，丟給 agent 也解決不了
+      const offerAsk = (intent.matchedBy === 'no-match');
+      const blocks = offerAsk ? _askOfferBlocks_(text, conv, userId) : null;
+      provider.postMessage(conv.channel, _intentHelpText_(userId, intent), conv.thread, blocks);
+    }
   }
+}
+
+
+// 按鈕的 value 上限 2000 字元，而使用者那句話可能很長——所以 value 只放
+// 快取鍵，原句存 CacheService。TTL 15 分鐘：這是「看到反問、決定要不要送」
+// 的合理猶豫時間，超過就讓他重講一次，而不是送出一句他早就忘了的話。
+const ASK_OFFER_TTL = 900;
+
+function _askOfferBlocks_(rawText, conv, userId) {
+  const key = 'askq_' + Utilities.getUuid();
+  CacheService.getScriptCache().put(key, String(rawText || ''), ASK_OFFER_TTL);
+  return [
+    { type: 'section', text: { type: 'mrkdwn', text: '_或者，我可以直接當成一般提問去查：_' } },
+    {
+      type: 'actions',
+      elements: [{
+        type: 'button',
+        text: { type: 'plain_text', text: '\uD83D\uDD0D 當成一般提問送出', emoji: true },
+        action_id: 'ask_confirm',
+        // kind 是必要的：parseInteraction 以前靠 question_id 判斷這是決策按鈕，
+        // 多一種按鈕之後就分不出來了（見 handleInteraction 開頭的分岔）
+        value: JSON.stringify({ kind: 'ask_confirm', k: key })
+      }]
+    }
+  ];
 }
 
 
