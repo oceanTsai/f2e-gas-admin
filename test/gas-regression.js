@@ -58,6 +58,7 @@ function src(files) {
 // 「getClassifier is not defined」——與 GAS 上少推一個檔完全一樣。
 const INTENT_SRC = [
   'slackBotProxy/core/text.js',
+  'slackBotProxy/core/conv.js',
   'slackBotProxy/core/github.js',
   'slackBotProxy/core/decision.js',
   'slackBotProxy/core/answer.js',
@@ -876,8 +877,11 @@ console.log('\n[3e] slackBotProxy — 自由提問（ask）');
 console.log('\n[3e-2] slackBotProxy — 續問接續同一支 ask 分支');
 // 實戰換來的：在 ask 的 thread 底下說「再試一次」，以前每次都開一支新分支、
 // 全新的空白工作區，於是 agent 只能反問「我看不到這句話是回覆給哪一則訊息」。
-// 修法是從 thread 第一則訊息（會被 notify-progress 更新成帶提問編號的看板）
-// 反查編號，讓 augma 沿用同一支分支。
+// 修法是從串文裡 Alice 自己的訊息（受理訊息會被 notify-progress 更新成帶提問
+// 編號的看板）反查編號，讓 augma 沿用同一支分支。
+//
+// 要掃**整串**而不是第一則：Alice 的受理訊息是貼在觸發者那則底下的回覆，所以
+// 第一則永遠是人打的那句話。這一節的假 thread 就照那個形狀組（H＝人、B＝Alice）。
 //
 // 同一個反查也決定了密語豁免：受理過的 thread 內追問不再要密語（串文裡每一句
 // 都打「速速前 再試一次」體感太差），所以兩者放在同一節一起驗。
@@ -886,11 +890,14 @@ console.log('\n[3e-2] slackBotProxy — 續問接續同一支 ask 分支');
   const env = mkEnv();
   Object.assign(global, env.globals);
   const posted = [], dispatched = [];
-  let rootText = '';
+  // null＝讀不到（scope／token／網路）。其餘是由舊到新的整串訊息。
+  let threadMsgs = [];
   let rootCalls = 0;
+  const H = t => ({ text: t, bot: false });   // 人打的
+  const B = t => ({ text: t, bot: true });    // Alice 自己發的
   const provider = {
     name: 'slack',
-    fetchThreadRoot: () => { rootCalls++; return rootText; },
+    fetchThreadTexts: () => { rootCalls++; return threadMsgs; },
     postMessage: (ch, text) => { posted.push(text); return { ts: '1700.9' }; },
     postAccepted: (conv, text) => {
       posted.push(text);
@@ -909,7 +916,8 @@ console.log('\n[3e-2] slackBotProxy — 續問接續同一支 ask 分支');
   const BOARD = '\u{1F680} *U0BP6PJQGKB-20260820-132620*\u3000\`ask\`\u3000(1/1)';
 
   // ── 串文追問 → 帶上第一輪的編號 ────────────────────────────────
-  rootText = BOARD;
+  // 真實形狀：第一則是人打的提問，看板是它的回覆
+  threadMsgs = [H('速速前 幫我查登入流程'), B(BOARD)];
   reset();
   handleAskRequest('速速前 再試一次', IN_THREAD, 'U1', provider);
   assert.strictEqual(dispatched.length, 1);
@@ -939,7 +947,7 @@ console.log('\n[3e-2] slackBotProxy — 續問接續同一支 ask 分支');
   // 這是最重要的一條：認錯的話追問會被寫到別人的 ask 分支上。
   CacheService.getScriptCache().remove('ask_U4');
   reset();
-  rootText = '\u{1F680} *VIPOP-46703*\u3000\`ra-pipeline\`\u3000(2/4)';
+  threadMsgs = [H('@Alice ra VIPOP-46703'), B('\u{1F680} *VIPOP-46703*\u3000\`ra-pipeline\`\u3000(2/4)')];
   handleAskRequest('速速前 這張單的登入流程在哪', { provider:'slack', channel:'C1', thread:'1700.2' }, 'U4', provider);
   assert.strictEqual(dispatched[0].askId, '', 'JIRA 單號不可被當成提問編號');
   ok('RA/SA 的 thread → 不誤認成 ask 續問（單號樣式與提問編號無交集）');
@@ -947,7 +955,7 @@ console.log('\n[3e-2] slackBotProxy — 續問接續同一支 ask 分支');
   // ── 反查失敗（缺 scope／讀不到）→ 降級成新的一輪，不可擋下提問 ──
   CacheService.getScriptCache().remove('ask_U5');
   reset();
-  rootText = null;
+  threadMsgs = null;
   handleAskRequest('速速前 再試一次', { provider:'slack', channel:'C1', thread:'1700.3' }, 'U5', provider);
   assert.strictEqual(dispatched.length, 1, '反查失敗絕不能擋下提問——沒有上文的答案仍然有用');
   assert.strictEqual(dispatched[0].askId, '');
@@ -958,12 +966,12 @@ console.log('\n[3e-2] slackBotProxy — 續問接續同一支 ask 分支');
   // 快取了那次的 miss，這個 thread 從此再也接不起來。
   CacheService.getScriptCache().remove('ask_U6');
   reset();
-  rootText = '\u{1F50D} 收到 <@U6> 的提問，正在查…';
+  threadMsgs = [H('速速前 第一題'), B('\u{1F50D} 收到 <@U6> 的提問，正在查…')];
   handleAskRequest('速速前 第一題', { provider:'slack', channel:'C1', thread:'1700.4' }, 'U6', provider);
   assert.strictEqual(dispatched[0].askId, '');
   CacheService.getScriptCache().remove('ask_U6');
   reset();
-  rootText = BOARD;   // 看板推上來了
+  threadMsgs = [H('速速前 第一題'), B(BOARD)];   // 看板推上來了
   handleAskRequest('速速前 追問', { provider:'slack', channel:'C1', thread:'1700.4' }, 'U6', provider);
   assert.strictEqual(dispatched[0].askId, 'U0BP6PJQGKB-20260820-132620',
     'miss 不可被快取，否則看板推上來之後這個 thread 永遠接不起來');
@@ -975,7 +983,7 @@ console.log('\n[3e-2] slackBotProxy — 續問接續同一支 ask 分支');
   // 而能打出那一句的人本來就有。
   CacheService.getScriptCache().remove('ask_U7');
   reset();
-  rootText = BOARD;
+  threadMsgs = [H('速速前 第一題'), B(BOARD)];
   handleAskRequest('再試一次', { provider:'slack', channel:'C1', thread:'1700.7' }, 'U7', provider);
   assert.strictEqual(dispatched.length, 1, '受理過的 thread 內追問不該再要密語');
   assert.strictEqual(dispatched[0].prompt, '再試一次');
@@ -986,7 +994,7 @@ console.log('\n[3e-2] slackBotProxy — 續問接續同一支 ask 分支');
   // 豁免的來源是「這串受理過」，不是「在 thread 裡」——RA 看板底下不算
   CacheService.getScriptCache().remove('ask_U8');
   reset();
-  rootText = '\u{1F680} *VIPOP-46703*\u3000\`ra-pipeline\`\u3000(2/4)';
+  threadMsgs = [H('@Alice ra VIPOP-46703'), B('\u{1F680} *VIPOP-46703*\u3000\`ra-pipeline\`\u3000(2/4)')];
   handleAskRequest('幫我查登入流程', { provider:'slack', channel:'C1', thread:'1700.8' }, 'U8', provider);
   assert.strictEqual(dispatched.length, 0, 'RA thread 不是 ask thread，沒有豁免');
   assert.ok(posted.some(t => t.indexOf('測試中') >= 0));
@@ -995,7 +1003,7 @@ console.log('\n[3e-2] slackBotProxy — 續問接續同一支 ask 分支');
   // 頻道裡直接問永遠沒有豁免（連反查都不必打）
   CacheService.getScriptCache().remove('ask_U8');
   reset();
-  rootText = BOARD;
+  threadMsgs = [H('速速前 第一題'), B(BOARD)];
   handleAskRequest('幫我查登入流程', { provider:'slack', channel:'C1', thread:null }, 'U8', provider);
   assert.strictEqual(dispatched.length, 0, '頻道裡的第一句一定要密語');
   assert.strictEqual(rootCalls, 0);
@@ -1003,13 +1011,42 @@ console.log('\n[3e-2] slackBotProxy — 續問接續同一支 ask 分支');
 
   // 反問按鈕的判斷要跟著同一條規則：這裡說不行而 handleAskRequest 其實會受理，
   // 等於在最需要那顆按鈕的地方（追問只打了「再試一次」）反而不附
-  rootText = BOARD;
+  threadMsgs = [H('速速前 第一題'), B(BOARD)];
   assert.strictEqual(_askAllowed_('再試一次'), false, '不給 conv 就只看密語');
   assert.strictEqual(
     _askAllowed_('再試一次', { provider:'slack', channel:'C1', thread:'1700.7' }, provider), true);
   assert.strictEqual(
     _askAllowed_('再試一次', { provider:'slack', channel:'C1', thread:null }, provider), false);
   ok('_askAllowed_ 與 handleAskRequest 同一條豁免規則（按鈕不會該附時不附）');
+
+  // ── 人打的字不算 ────────────────────────────────────────────────
+  // 提問編號會直接變成 git 分支名。貼一段別人的編號就能把追問寫進別人的分支，
+  // 而且順帶連密語都不用打——所以只認 Alice 自己發的訊息。
+  CacheService.getScriptCache().remove('ask_U9');
+  reset();
+  threadMsgs = [H('速速前 第一題'), H('我看到的編號是 U0BP6PJQGKB-20260820-132620')];
+  handleAskRequest('速速前 追問', { provider:'slack', channel:'C1', thread:'1700.10' }, 'U9', provider);
+  assert.strictEqual(dispatched[0].askId, '', '人貼的編號不可以決定要寫進哪一支分支');
+  CacheService.getScriptCache().remove('ask_U9');
+  reset();
+  handleAskRequest('沒有密語', { provider:'slack', channel:'C1', thread:'1700.10' }, 'U9', provider);
+  assert.strictEqual(dispatched.length, 0, '也不能靠貼編號繞過密語');
+  ok('人打的編號一律不算（分支歸屬與密語豁免都只認 Alice 自己的訊息）');
+
+  // ── 由舊到新取第一個命中 ────────────────────────────────────────
+  // 串裡若有兩個看板（第一輪反查失敗而新開了一輪），歸屬要留在最早那一支，
+  // 否則同一串會在兩支分支之間跳。
+  CacheService.getScriptCache().remove('ask_U10');
+  reset();
+  threadMsgs = [
+    H('速速前 第一題'),
+    B('\u{1F680} *UAAA-20260820-100000*\u3000\`ask\`\u3000(1/1)'),
+    B('\u{1F680} *UBBB-20260820-200000*\u3000\`ask\`\u3000(1/1)')
+  ];
+  handleAskRequest('速速前 追問', { provider:'slack', channel:'C1', thread:'1700.11' }, 'U10', provider);
+  assert.strictEqual(dispatched[0].askId, 'UAAA-20260820-100000',
+    '歸屬留在最早那一支，否則同一串會在兩支分支之間跳');
+  ok('串裡有多個看板 → 取最早那一個');
   `);
 }
 
@@ -1161,6 +1198,106 @@ console.log('\n[3f] slackBotProxy — 反問時的「當成一般提問送出」
 
 
 // ══════════════════════════════════════════════════════════════════
+console.log('\n[3g] slackBotProxy — Alice 回在觸發訊息底下');
+// 實戰體感換來的：人在頻道貼一段長提問，Alice 卻在頻道裡**另起一則新訊息**才
+// 開始回，於是提問與回答變成兩件看起來不相干的事，提問越長越明顯。
+//
+// 修法是把「我在哪個 thread」與「我要回哪裡」拆成兩個欄位（core/conv.js）：
+//   thread  ── 真的在 thread 裡才有值。null 是兩支反查省掉一次 Slack API 的依據，
+//              也是「不在 thread 裡」與「在 thread 裡但查不到單號」的分界
+//   replyTo ── 觸發訊息自己的 ts。Alice 貼在它底下，讓它成為那則的 thread
+// ══════════════════════════════════════════════════════════════════
+{
+  const env = mkEnv({ SLACK_TOKEN: 'xoxb-fake' });
+  Object.assign(global, env.globals);
+
+  eval(src(['slackBotProxy/core/conv.js', 'slackBotProxy/providers/slack.js']) + `
+  // ── 錨點優先序 ──────────────────────────────────────────────────
+  assert.strictEqual(_replyTarget_({ channel:'C1', thread:'1700.1', replyTo:'1700.5' }), '1700.1',
+    '已經在 thread 裡就回那個 thread——Slack 不支援 thread 內再開 thread');
+  assert.strictEqual(_replyTarget_({ channel:'C1', thread:null, replyTo:'1700.5' }), '1700.5',
+    '頻道裡直接 @ → 回在他那則底下');
+  assert.strictEqual(_replyTarget_({ channel:'C1', thread:null }), null,
+    'slash command 沒有訊息可掛 → 頻道層級');
+  assert.strictEqual(_replyTarget_(null), null);
+  ok('_replyTarget_：thread ＞ replyTo ＞ 頻道層級');
+
+  // ── postAccepted 要把受理訊息貼在觸發訊息底下 ────────────────────
+  const sent = [];
+  SlackProvider.postMessage = function (ch, text, threadTs) {
+    sent.push({ ch: ch, threadTs: threadTs });
+    return { ts: '1700.9' };   // Alice 自己那則的 ts
+  };
+
+  sent.length = 0;
+  let anchored = SlackProvider.postAccepted({ channel:'C1', thread:null, replyTo:'1700.5' }, '受理');
+  assert.strictEqual(sent[0].threadTs, '1700.5', '受理訊息要掛在觸發訊息底下');
+  assert.strictEqual(anchored.thread, '1700.5',
+    '後續（進度、答案、追問）全部回到同一串——這個值幾分鐘後就沒有事件可以重新推導');
+  assert.strictEqual(anchored.status_ts, '1700.9',
+    'status_ts 必須是 Alice 自己那則：拿別人的訊息去 chat.update 會被 Slack 拒絕');
+  ok('頻道內觸發 → 受理訊息成為觸發訊息的 thread，狀態列仍指向 Alice 自己那則');
+
+  sent.length = 0;
+  anchored = SlackProvider.postAccepted({ channel:'C1', thread:'1700.1', replyTo:'1700.5' }, '受理');
+  assert.strictEqual(sent[0].threadTs, '1700.1', '既有 thread 內觸發 → 沿用那個 thread');
+  assert.strictEqual(anchored.thread, '1700.1');
+  ok('既有 thread 內觸發 → 沿用原 thread（不會拆成另一串）');
+
+  sent.length = 0;
+  anchored = SlackProvider.postAccepted({ channel:'C1', thread:null }, '受理');
+  assert.strictEqual(sent[0].threadTs, null, 'slash command 沒有可掛的訊息');
+  assert.strictEqual(anchored.thread, '1700.9', '那時才退回用自己的 ts 當錨點');
+  ok('slash command → 頻道層級，並用自己那則當後續錨點');
+
+  // ── fetchThreadRoot 仍然只看第一則 ─────────────────────────────
+  // 這一條是安全邊界：單號反查絕不能改成掃整串。Alice 自己的訊息裡有**範例**
+  // 單號（「例：\`@Alice ra VIPOP-12345\`」），掃到它的後果是答案被寫進別張單。
+  const realFetchTexts = SlackProvider.fetchThreadTexts;
+  SlackProvider.fetchThreadTexts = function () {
+    return [
+      { text: '@Alice ra VIPOP-46703', bot: false },
+      { text: '⚠️ 請提供 Jira ID（例：\`@Alice ra VIPOP-12345\`）', bot: true }
+    ];
+  };
+  assert.strictEqual(SlackProvider.fetchThreadRoot('C1', '1700.1'), '@Alice ra VIPOP-46703',
+    '單號只認第一則——Alice 訊息裡的範例單號不可以參與反查');
+  SlackProvider.fetchThreadTexts = function () { return null; };
+  assert.strictEqual(SlackProvider.fetchThreadRoot('C1', '1700.1'), null,
+    '讀不到要回 null（不是空字串）：上層靠這個分辨「缺 scope」與「沒有單號」');
+  SlackProvider.fetchThreadTexts = function () { return []; };
+  assert.strictEqual(SlackProvider.fetchThreadRoot('C1', '1700.1'), '');
+  ok('fetchThreadRoot 只取第一則（範例單號不會被誤認）、讀不到回 null');
+
+  // ── 同一次執行只打一次 conversations.replies ─────────────────────
+  // 單號反查與提問編號反查是兩支獨立的邏輯，但問的是同一串。3 秒預算下多打一次
+  // API 就可能讓 Slack 判逾時並重送整個事件（重送的後果見 _isDuplicateEvent_）。
+  SlackProvider.fetchThreadTexts = realFetchTexts;   // 還原成真的實作
+  let fetches = 0;
+  UrlFetchApp.fetch = function (url) {
+    fetches++;
+    assert.ok(url.indexOf('limit=' + THREAD_SCAN_LIMIT) > 0, 'limit 要帶上：' + url);
+    return { getContentText: () => JSON.stringify({ ok: true, messages: [
+      { text: '速速前 幫我查登入流程', user: 'U1' },
+      { text: '\u{1F680} *U1-20260820-132620*\u3000\`ask\`\u3000(1/1)', bot_id: 'B123' }
+    ]})};
+  };
+
+  const msgs = SlackProvider.fetchThreadTexts('C1', '1700.5');
+  assert.strictEqual(msgs.length, 2);
+  assert.strictEqual(msgs[0].bot, false, '人打的那則不可以被標成 bot');
+  assert.strictEqual(msgs[1].bot, true, 'bot_id 就是 Alice 自己發的憑據');
+  SlackProvider.fetchThreadTexts('C1', '1700.5');
+  SlackProvider.fetchThreadRoot('C1', '1700.5');
+  assert.strictEqual(fetches, 1, '同一次執行、同一串 → 只打一次 API');
+  SlackProvider.fetchThreadTexts('C1', '1700.6');
+  assert.strictEqual(fetches, 2, '不同串當然要各打一次');
+  ok('fetchThreadTexts 標出 bot 訊息，且同一次執行內共用同一次 API 呼叫');
+  `);
+}
+
+
+// ══════════════════════════════════════════════════════════════════
 console.log();
 console.log('[3b] slackBotProxy — 收到出向請求要明確報錯，不能靜默回 ok');
 // 拆分後若 AUGMA_NOTIFY_ENDPOINT 還指向這支，回純文字 'ok'（HTTP 200）會讓
@@ -1171,8 +1308,9 @@ console.log('[3b] slackBotProxy — 收到出向請求要明確報錯，不能�
   Object.assign(global, env.globals);
   global.getProvider = () => ({ name: 'slack', postMessage: () => ({}) });
 
-  eval(src(['slackBotProxy/core/github.js', 'slackBotProxy/core/decision.js',
-            'slackBotProxy/core/intent.js', 'slackBotProxy/slackBotProxy.js']) + `
+  eval(src(['slackBotProxy/core/conv.js', 'slackBotProxy/core/github.js',
+            'slackBotProxy/core/decision.js', 'slackBotProxy/core/intent.js',
+            'slackBotProxy/slackBotProxy.js']) + `
   ['decision', 'progress'].forEach(function (a) {
     const body = doPost({ parameter: {}, postData: { contents: JSON.stringify({ action: a, jira_id: 'VIPOP-1' }) } })._t;
     assert.ok(body.indexOf('"error"') >= 0, a + ' 應回帶 error 的 JSON，實際：' + body);

@@ -7,19 +7,29 @@
 //  【入向專用】只負責解析人的動作並回應。把訊息貼給人看的出向流程
 //  （決策卡片、進度看板）已拆到 messageDispatch 專案。
 
+// 反查要掃幾則。看板一定在最前面（受理當下就貼），所以不必掃完整串；
+// 100 則足以涵蓋「人先聊了一段才 @Alice」的情況，又不會讓回應體積失控。
+const THREAD_SCAN_LIMIT = 100;
+
+// 同一次執行內的 thread 內容快取（見 fetchThreadTexts）。
+const THREAD_FETCH_MEMO = {};
+
 const SlackProvider = {
   name: 'slack',
 
   // 1. 發送任務受理訊息並回傳補齊 thread 錨點的 conversation
   postAccepted: function(conv, text) {
     const channel = conv.channel;
-    const threadTs = conv.thread || null;
+    // 在既有 thread 內就沿用那個 thread；否則掛在觸發者那則訊息底下（replyTo）。
+    // 兩者都沒有（slash command 沒有訊息可掛）才是頻道層級，那時退回用自己的 ts。
+    const threadTs = _replyTarget_(conv);
     const res = this.postMessage(channel, text, threadTs);
     const acceptedTs = res ? res.ts : null;
     return {
       provider: 'slack',
       channel: channel,
-      // thread：後續訊息要掛在哪。使用者在既有 thread 內 @ 時沿用那個 thread
+      // thread：後續訊息（進度、答案、追問）要掛在哪。幾分鐘後答案回來時已經沒有
+      // 任何 Slack 事件可以推導這件事，所以必須在 dispatch 之前就定案。
       thread: threadTs || acceptedTs,
       // status_ts：進度回報要 chat.update 的目標，**必須**是我們自己發的受理訊息。
       // 不能用 thread——在既有 thread 內觸發時那是別人的訊息，bot 無權更新。
@@ -235,21 +245,50 @@ const SlackProvider = {
 
   // 取 thread 第一則訊息的文字。入向靠它反查「這個 thread 是哪張單」——
   // 出向已拆到 messageDispatch，而 ScriptProperties 是 per-script 的，所以不能
-  // 再靠「貼卡片時存、答覆時讀」。thread 的第一則訊息（任務受理訊息或決策卡片
-  // 的 summary）本來就帶著單號，反查它就不需要任何跨專案共享狀態。
+  // 再靠「貼卡片時存、答覆時讀」。thread 的第一則訊息本來就帶著單號（人打的
+  // `@Alice ra VIPOP-46703`，或 Alice 自己貼的受理訊息／決策卡片 summary），
+  // 反查它就不需要任何跨專案共享狀態。
+  //
+  // ⚠️ 刻意**只看第一則**。掃整串會把 Alice 自己訊息裡的範例單號吃進來
+  //    （「例：`@Alice ra VIPOP-12345`」），而那個誤認的後果是答案被寫到別張單。
+  fetchThreadRoot: function (channel, threadTs) {
+    const msgs = this.fetchThreadTexts(channel, threadTs);
+    if (msgs === null) return null;   // 讀不到（scope／token／網路）
+    return msgs.length ? msgs[0].text : '';
+  },
+
+  // 取整個 thread 的訊息（由舊到新，含第一則），每則帶 bot 旗標。
+  //
+  // 為什麼需要「整串」而不只是第一則：Alice 現在回在**觸發訊息底下**，所以
+  // thread 的第一則是人打的那句話，帶著提問編號的看板是它的回覆。ask 的續問
+  // 反查只讀第一則就永遠找不到編號，每次追問都會開一支新的空白分支。
+  //
+  // bot 旗標是必要的：提問編號會直接變成 git 分支名，人打的字不該有那個權力。
   //
   // 需要 channels:history（公開頻道）／groups:history（私人頻道）scope。
-  fetchThreadRoot: function (channel, threadTs) {
+  fetchThreadTexts: function (channel, threadTs) {
+    // 同一次執行內，單號反查與提問編號反查會各叫一次；memo 讓它們共用同一次
+    // API 呼叫（3 秒預算很緊）。GAS 每次執行都重新載入腳本，所以不會跨請求殘留。
+    const memoKey = String(channel) + '|' + String(threadTs);
+    if (Object.prototype.hasOwnProperty.call(THREAD_FETCH_MEMO, memoKey)) {
+      return THREAD_FETCH_MEMO[memoKey];
+    }
+    const out = this._fetchThreadReplies_(channel, threadTs);
+    THREAD_FETCH_MEMO[memoKey] = out;
+    return out;
+  },
+
+  _fetchThreadReplies_: function (channel, threadTs) {
     const token = PropertiesService.getScriptProperties().getProperty('SLACK_TOKEN');
     if (!token) {
-      console.error('未設定 SLACK_TOKEN，無法反查 thread 單號');
+      console.error('未設定 SLACK_TOKEN，無法反查 thread 內容');
       return null;
     }
 
     const url = 'https://slack.com/api/conversations.replies' +
                 '?channel=' + encodeURIComponent(channel) +
                 '&ts=' + encodeURIComponent(threadTs) +
-                '&limit=1';
+                '&limit=' + THREAD_SCAN_LIMIT;
     try {
       const res = UrlFetchApp.fetch(url, {
         method: 'get',
@@ -272,8 +311,19 @@ const SlackProvider = {
         }
         return null;
       }
-      const first = (json.messages && json.messages[0]) || null;
-      return first ? (first.text || '') : '';
+      // 截掉的是**最新**那一段，而要找的東西（受理訊息／看板）一定在最前面：
+      // 它是受理當下就貼出去的。所以截斷不影響反查，但還是要留下痕跡。
+      if (json.has_more) {
+        console.log('thread 超過 ' + THREAD_SCAN_LIMIT + ' 則，只掃了最前面那些');
+      }
+      return (json.messages || []).map(function (m) {
+        return {
+          text: (m && m.text) || '',
+          // bot_id 只有 bot 發的訊息才有。app_id 一起看是為了保險：Slack 對
+          // 不同發送方式（webhook／bot token）帶的欄位不完全一致。
+          bot: !!(m && (m.bot_id || m.app_id))
+        };
+      });
     } catch (err) {
       console.error('conversations.replies 異常:', err);
       return null;

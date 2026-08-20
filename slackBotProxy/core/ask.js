@@ -91,16 +91,28 @@ function _askAllowed_(rawText, conv, provider) {
 //  「那第二點再展開一下」時，agent 看到的只有那五個字，沒有上文——只能反問
 //  「你要我重試什麼」。實際踩到過。
 //
-//  解法：不引入任何共享儲存，沿用 decision.js 那個「thread 的第一則訊息就是
-//  路由資訊」的作法。ask 的受理訊息會被 notify-progress.sh 就地 chat.update
-//  成進度看板，而看板標題帶著提問編號（`🚀 *U1-20260820-132620* \`ask\` (1/1)`）。
+//  解法：不引入任何共享儲存，沿用 decision.js 那個「路由資訊就寫在訊息裡」的
+//  作法。ask 的受理訊息會被 notify-progress.sh 就地 chat.update 成進度看板，
+//  而看板標題帶著提問編號（`🚀 *U1-20260820-132620* \`ask\` (1/1)`）。
 //  反查它即可，GAS 這側依舊零狀態。
+//
+//  ⚠️ 要掃**整串**，不能只讀第一則。Alice 的受理訊息現在是貼在觸發者那則底下
+//     的回覆（見 core/conv.js），所以 thread 的第一則是人打的那句話，看板是
+//     第二則。只讀第一則的話續問永遠接不起來——而它壞掉的樣子跟「功能沒做」
+//     一模一樣：每次都開新分支、agent 每次都反問「要重試什麼」。
+//
+//  ⚠️ 只認 Alice 自己發的訊息（bot 旗標）。提問編號會直接變成 git 分支名，
+//     人打的字不該有那個權力——否則貼一段別人的編號就能把追問寫進別人的分支。
+//
+//  ⚠️ 由舊到新取**第一個**命中的：那是開出這一串的那一輪，也就是這個 thread
+//     真正歸屬的分支。取最新的話，串裡任何一次「反查失敗而新開的輪次」都會把
+//     歸屬搶走，於是同一串會在兩支分支之間跳。
 //
 //  ⚠️ 反查失敗一律回空字串＝開新的一輪，**絕不因此擋下提問**。
 //     沒有上文的答案仍然有用；擋下來他就什麼都沒有。
 //
-//  ⚠️ 只快取命中的結果。第一輪的 thread root 此刻可能還是「正在查…」（看板
-//     還沒推上來），快取了那次的 miss 會讓這個 thread 從此再也接不起來。
+//  ⚠️ 只快取命中的結果。第一輪的看板此刻可能還沒推上來（Alice 的訊息還是
+//     「正在查…」），快取了那次的 miss 會讓這個 thread 從此再也接不起來。
 // ═══════════════════════════════════════════════════════════════════
 
 // 樣式要夠緊，否則會把別的 thread 認成 ask thread。JIRA 單號（VIPOP-46703）
@@ -119,17 +131,21 @@ function _resolveAskIdFromThread_(conv, provider) {
   const hit = cache.get(ck);
   if (hit) return hit;
 
-  if (!provider || !provider.fetchThreadRoot) return '';
+  if (!provider || !provider.fetchThreadTexts) return '';
 
-  const rootText = provider.fetchThreadRoot(channel, thread);
-  // null＝讀不到（scope／token／網路）、''＝讀到了但沒文字。兩者都當新的一輪。
-  if (!rootText) return '';
+  // null＝讀不到（scope／token／網路）。當新的一輪。
+  const msgs = provider.fetchThreadTexts(channel, thread);
+  if (!msgs || !msgs.length) return '';
 
-  const m = String(rootText).match(ASK_ID_IN_TEXT_RE);
-  if (!m) return '';
-
-  cache.put(ck, m[1], ASK_ROUTE_CACHE_TTL);
-  return m[1];
+  for (let i = 0; i < msgs.length; i++) {
+    const m = msgs[i];
+    if (!m || !m.bot) continue;
+    const hit = String(m.text || '').match(ASK_ID_IN_TEXT_RE);
+    if (!hit) continue;
+    cache.put(ck, hit[1], ASK_ROUTE_CACHE_TTL);
+    return hit[1];
+  }
+  return '';
 }
 
 
@@ -143,7 +159,7 @@ function handleAskRequest(args, conv, user, provider) {
   ].join('\u000a');
 
   if (!prompt) {
-    provider.postMessage(conv.channel, '<@' + user + '> ⚠️ 要問什麼？' + '\u000a' + USAGE, conv.thread);
+    provider.postMessage(conv.channel, '<@' + user + '> ⚠️ 要問什麼？' + '\u000a' + USAGE, _replyTarget_(conv));
     return;
   }
 
@@ -164,20 +180,20 @@ function handleAskRequest(args, conv, user, provider) {
     provider.postMessage(conv.channel,
       '<@' + user + '> \uD83D\uDD12 自由提問還在測試中，目前只開放給知道通關密語的人。' +
       (owner ? ('需要用的話找 <@' + owner + '> 拿。') : '需要用的話找專案負責人拿。'),
-      conv.thread);
+      _replyTarget_(conv));
     return;
   }
   const asked = gate.prompt;
   if (!asked) {
     // 只打了密語、沒有問題本文
-    provider.postMessage(conv.channel, '<@' + user + '> \u26a0\ufe0f 密語對了，但你還沒說要問什麼。' + '\u000a' + USAGE, conv.thread);
+    provider.postMessage(conv.channel, '<@' + user + '> \u26a0\ufe0f 密語對了，但你還沒說要問什麼。' + '\u000a' + USAGE, _replyTarget_(conv));
     return;
   }
 
   if (asked.length > ASK_MAX_CHARS) {
     provider.postMessage(conv.channel,
       '<@' + user + '> ⚠️ 問題太長了（' + asked.length + ' 字，上限 ' + ASK_MAX_CHARS + '）。' +
-      '如果是要我看一整份檔案或 log，直接說它的路徑就好，我自己會去讀。', conv.thread);
+      '如果是要我看一整份檔案或 log，直接說它的路徑就好，我自己會去讀。', _replyTarget_(conv));
     return;
   }
 
@@ -186,7 +202,7 @@ function handleAskRequest(args, conv, user, provider) {
   if (cache.get(throttleKey)) {
     provider.postMessage(conv.channel,
       '<@' + user + '> ⏳ 你剛剛才問過一題，等前一題回來再問下一題。' +
-      '（每題會佔用一台 runner，而 RA / SA 的工作要排在後面）', conv.thread);
+      '（每題會佔用一台 runner，而 RA / SA 的工作要排在後面）', _replyTarget_(conv));
     return;
   }
 
@@ -198,9 +214,9 @@ function handleAskRequest(args, conv, user, provider) {
   // 先貼受理訊息取得 thread 錨點，再 dispatch。
   //
   // 與 _triggerPipelineTask_ 同一個順序，理由也相同：答案要回到哪裡必須在
-  // dispatch 之前就定案，而使用者在頻道裡直接 @ 時根本還沒有 thread。
-  // postAccepted 會用受理訊息自己的 ts 當錨點，於是幾分鐘後答案回來時是掛在
-  // 這則底下，不會洗頻。
+  // dispatch 之前就定案——幾分鐘後答案回來時已經沒有任何 Slack 事件可以推導它。
+  // 受理訊息會貼在他那則提問底下（見 core/conv.js 的 replyTo），所以看板、答案、
+  // 追問全部落在同一串，提問與回答不會被拆成兩件看起來不相干的事。
   //
   // 受理訊息要講明是不是續問：那決定了「他能不能期待我懂上文」。看起來像客套，
   // 但反查失敗時他會直接從這句話看出來，不必等幾分鐘後收到一則答非所問的回覆。

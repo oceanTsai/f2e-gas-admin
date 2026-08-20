@@ -152,7 +152,7 @@ function handleTextAnswer(args, conv, user, provider, opts) {
   ].join('\u000a');
 
   if (!raw) {
-    provider.postMessage(conv.channel, '<@' + user + '> ⚠️ 請一併給出答覆內容。' + '\u000a' + USAGE, conv.thread);
+    provider.postMessage(conv.channel, '<@' + user + '> ⚠️ 請一併給出答覆內容。' + '\u000a' + USAGE, _replyTarget_(conv));
     return;
   }
 
@@ -167,7 +167,7 @@ function handleTextAnswer(args, conv, user, provider, opts) {
     provider.postMessage(conv.channel,
       '<@' + user + '> ⚠️ ' + ((route && route.err === 'fetch-failed')
         ? '我讀不到這個 thread 的第一則訊息（多半是缺 `channels:history` 權限，改過 scope 後要重新安裝 App）。'
-        : '這裡沒有待決問題。') + '\u000a' + USAGE, conv.thread);
+        : '這裡沒有待決問題。') + '\u000a' + USAGE, _replyTarget_(conv));
     return;
   }
 
@@ -197,7 +197,7 @@ function handleTextAnswer(args, conv, user, provider, opts) {
   if (parsed.mode === 'unparsed') {
     _recordIntentMiss_(raw, conv, 'answer-unparsed');
     provider.postMessage(conv.channel,
-      _answerAmbiguousText_(user, jiraId, pending), conv.thread);
+      _answerAmbiguousText_(user, jiraId, pending), _replyTarget_(conv));
     return;
   }
 
@@ -437,7 +437,7 @@ const PHASE_ICON = {
 function handleStatusQuery(jiraId, conv, user, provider) {
   if (!jiraId) {
     provider.postMessage(conv.channel,
-      '<@' + user + '> 要查哪張單？例：`@Alice VIPOP-12345 進度`', conv.thread);
+      '<@' + user + '> 要查哪張單？例：`@Alice VIPOP-12345 進度`', _replyTarget_(conv));
     return;
   }
 
@@ -445,7 +445,7 @@ function handleStatusQuery(jiraId, conv, user, provider) {
   if (!progress) {
     provider.postMessage(conv.channel,
       '<@' + user + '> 讀不到 ' + jiraId + ' 的狀態。可能還沒開始跑，或產物尚未推上分支。',
-      conv.thread);
+      _replyTarget_(conv));
     return;
   }
 
@@ -499,7 +499,7 @@ function handleStatusQuery(jiraId, conv, user, provider) {
     lines.push('_最後更新：' + progress.updated_at + '_');
   }
 
-  provider.postMessage(conv.channel, lines.join('\n'), conv.thread);
+  provider.postMessage(conv.channel, lines.join('\n'), _replyTarget_(conv));
 }
 
 

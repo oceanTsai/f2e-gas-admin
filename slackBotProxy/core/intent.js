@@ -156,7 +156,7 @@ function routeByIntent(text, conv, userId, provider) {
       // 這顆按鈕的地方（追問時只打了「再試一次」）反而不附。
       const offerAsk = (intent.matchedBy === 'no-match') && _askAllowed_(text, conv, provider);
       const blocks = offerAsk ? _askOfferBlocks_(text, conv, userId) : null;
-      provider.postMessage(conv.channel, _intentHelpText_(userId, intent), conv.thread, blocks);
+      provider.postMessage(conv.channel, _intentHelpText_(userId, intent), _replyTarget_(conv), blocks);
     }
   }
 }

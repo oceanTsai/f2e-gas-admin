@@ -163,9 +163,14 @@ function _routeMentionEvent_(event, provider) {
   const [cmd, ...rest] = text.split(/\s+/);
   const args = rest.join(' ').trim();
 
+  // thread 與 replyTo 是兩件事，不能合併（見 core/conv.js 的說明）：
+  //   thread  ── 真的在 thread 裡才有值，null 是反查用來省掉一次 Slack API 的依據
+  //   replyTo ── 他那則訊息自己的 ts。Alice 的回覆要掛在它底下，而不是在頻道裡
+  //              另起一則新訊息——提問與回答被拆成兩段時，越長的提問越難看
   const conv = {
     channel: event.channel,
-    thread: event.thread_ts || null
+    thread: event.thread_ts || null,
+    replyTo: event.ts || null
   };
 
   switch (cmd.toLowerCase()) {
@@ -221,7 +226,7 @@ function _routeMentionEvent_(event, provider) {
 
 function _triggerPipelineTask_(pipelineType, jiraId, conv, user, provider) {
   if (!jiraId) {
-    provider.postMessage(conv.channel, `<@${user}> ⚠️ 請提供 Jira ID（例：\`@Alice ${pipelineType === 'ra-pipeline' ? 'ra' : 'sa'} VIPOP-12345\`）`, conv.thread);
+    provider.postMessage(conv.channel, `<@${user}> ⚠️ 請提供 Jira ID（例：\`@Alice ${pipelineType === 'ra-pipeline' ? 'ra' : 'sa'} VIPOP-12345\`）`, _replyTarget_(conv));
     return;
   }
 
@@ -237,7 +242,7 @@ function _triggerPipelineTask_(pipelineType, jiraId, conv, user, provider) {
     provider.postMessage(
       conv.channel,
       `<@${user}> ⏳ ${cleanJiraId} 的 ${pipelineType} 剛剛已經觸發過了。若確定要重跑，請稍待一分鐘。`,
-      conv.thread
+      _replyTarget_(conv)
     );
     return;
   }

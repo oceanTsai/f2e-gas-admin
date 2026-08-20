@@ -142,7 +142,7 @@ function _applySingle_(items, ctx) {
     question = progress ? _findQuestion_(progress, questionId) : null;
     if (progress && !question) {
       provider.postMessage(conv.channel,
-        '<@' + user + '> 找不到 ' + jiraId + ' 的 ' + questionId + ' 這一題。', conv.thread);
+        '<@' + user + '> 找不到 ' + jiraId + ' 的 ' + questionId + ' 這一題。', _replyTarget_(conv));
       return;
     }
     // progress 讀不到（產物還沒 push）但有明確題號 → 照樣 dispatch，只是跳過閘門
@@ -153,7 +153,7 @@ function _applySingle_(items, ctx) {
       provider.postMessage(conv.channel,
         '<@' + user + '> 暫時讀不到 ' + jiraId +
         ' 的流程狀態，請改成明確指定題號：`@Alice answer Q-001 <你的答覆>`',
-        conv.thread);
+        _replyTarget_(conv));
       return;
     }
     const pendingCache = CacheService.getScriptCache();
@@ -162,7 +162,7 @@ function _applySingle_(items, ctx) {
     });
     if (pending.length === 0) {
       provider.postMessage(conv.channel,
-        '<@' + user + '> ' + jiraId + ' 目前沒有待回覆的問題。', conv.thread);
+        '<@' + user + '> ' + jiraId + ' 目前沒有待回覆的問題。', _replyTarget_(conv));
       return;
     }
     question = pending[0];
@@ -179,7 +179,7 @@ function _applySingle_(items, ctx) {
   if (!ctx.pipeline) {
     provider.postMessage(conv.channel,
       '<@' + user + '> 讀不到 ' + jiraId + ' 要接續哪條 pipeline，沒辦法安全地用文字接續。' +
-      '請直接點卡片上的按鈕（按鈕本身帶著這個資訊）。', conv.thread);
+      '請直接點卡片上的按鈕（按鈕本身帶著這個資訊）。', _replyTarget_(conv));
     return;
   }
 
@@ -193,7 +193,7 @@ function _applySingle_(items, ctx) {
       ' 是放行閘門，請直接點卡片上的按鈕。' + '\u000a' +
       '若還不想放行，就先不要動作——卡片會留在這裡等你。' + '\u000a' +
       '需要補充說明時請直接在 thread 討論，那不會觸發任何流程。',
-      conv.thread);
+      _replyTarget_(conv));
     return;
   }
 
@@ -203,7 +203,7 @@ function _applySingle_(items, ctx) {
   if (dup.answered) {
     provider.postMessage(conv.channel,
       '<@' + user + '> ℹ️ ' + questionId + ' 已由 ' + dup.by + ' 回答，本次回覆不生效。',
-      conv.thread);
+      _replyTarget_(conv));
     return;
   }
   cache.put(cacheKey, '<@' + user + '>', ANSWER_CACHE_TTL);
@@ -225,12 +225,12 @@ function _applySingle_(items, ctx) {
       }
     }
     provider.postMessage(conv.channel,
-      '✅ 已收下 <@' + user + '> 對 ' + questionId + ' 的回覆。' + tail, conv.thread);
+      '✅ 已收下 <@' + user + '> 對 ' + questionId + ' 的回覆。' + tail, _replyTarget_(conv));
   } else {
     cache.remove(cacheKey);   // dispatch 失敗要讓人能重試
     provider.postMessage(conv.channel,
       '⚠️ <@' + user + '> 回覆已記錄，但觸發 GitHub Actions 失敗，' +
-      '請確認 GITHUB_TOKEN 或稍後重試。', conv.thread);
+      '請確認 GITHUB_TOKEN 或稍後重試。', _replyTarget_(conv));
   }
 }
 
@@ -255,7 +255,7 @@ function _applyBatch_(items, ctx) {
   if (!ctx.pipeline) {
     provider.postMessage(conv.channel,
       '<@' + user + '> 讀不到 ' + jiraId + ' 要接續哪條 pipeline，沒辦法安全地用文字接續。' +
-      '請直接點卡片上的按鈕（按鈕本身帶著這個資訊）。', conv.thread);
+      '請直接點卡片上的按鈕（按鈕本身帶著這個資訊）。', _replyTarget_(conv));
     return;
   }
 
@@ -267,7 +267,7 @@ function _applyBatch_(items, ctx) {
   if (already.length === qids.length) {
     provider.postMessage(conv.channel,
       '<@' + user + '> ℹ️ 這 ' + qids.length + ' 題稍早都已經收下過了（' +
-      qids.join('、') + '），本次貼上不重複送出。', conv.thread);
+      qids.join('、') + '），本次貼上不重複送出。', _replyTarget_(conv));
     return;
   }
 
@@ -282,7 +282,7 @@ function _applyBatch_(items, ctx) {
     qids.forEach(function (qid) { cache.remove(_answerKey_(jiraId, qid)); });
     provider.postMessage(conv.channel,
       '⚠️ <@' + user + '> 觸發 GitHub Actions 失敗，這份回覆沒有送出。' +
-      '請確認 GITHUB_TOKEN 或稍後再貼一次。', conv.thread);
+      '請確認 GITHUB_TOKEN 或稍後再貼一次。', _replyTarget_(conv));
     return;
   }
 
@@ -307,5 +307,5 @@ function _applyBatch_(items, ctx) {
   }
   lines.push('ℹ️ 卡片上這幾題的按鈕可以忽略，點了會被擋下。');
 
-  provider.postMessage(conv.channel, lines.join('\u000a'), conv.thread);
+  provider.postMessage(conv.channel, lines.join('\u000a'), _replyTarget_(conv));
 }

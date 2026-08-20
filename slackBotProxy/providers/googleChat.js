@@ -41,5 +41,6 @@ const GoogleChatProvider = {
   updateMessage:    function() { _googleChatNotImplemented_('updateMessage'); },
   postWebhook:      function() { _googleChatNotImplemented_('postWebhook'); },
 
-  fetchThreadRoot:  function() { _googleChatNotImplemented_('fetchThreadRoot'); }
+  fetchThreadRoot:  function() { _googleChatNotImplemented_('fetchThreadRoot'); },
+  fetchThreadTexts: function() { _googleChatNotImplemented_('fetchThreadTexts'); }
 };
