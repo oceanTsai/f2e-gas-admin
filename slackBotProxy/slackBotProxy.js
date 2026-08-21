@@ -120,7 +120,7 @@ function _routeSlashCommand_(e, provider) {
       provider.postWebhook(
         '🧪 /test 測試\n' +
         '• 收到參數：`' + (text || '(無)') + '`\n' +
-        '• 觸發者：<@' + user + '>\n' +
+        '• 觸發者：' + provider.mention(user) + '\n' +
         '• 來源頻道：`' + channel + '`\n'
       );
       return ContentService.createTextOutput('🧪 test 已送出');
@@ -142,15 +142,15 @@ function _routeSlashCommand_(e, provider) {
       return ContentService.createTextOutput('🔍 收到，正在查…');
 
     case '/coding':
-      provider.postMessage(channel, `<@${user}> ✅ coding 任務已收到\n參數：\`${text || '(無)'}\``);
+      provider.postMessage(channel, `${provider.mention(user)} ✅ coding 任務已收到\n參數：\`${text || '(無)'}\``, _replyTarget_(conv));
       return ContentService.createTextOutput('🚀 收到，coding 處理中…');
 
     case '/deploy':
-      provider.postMessage(channel, `<@${user}> ✅ deploy 任務已收到\n參數：\`${text || '(無)'}\``);
+      provider.postMessage(channel, `${provider.mention(user)} ✅ deploy 任務已收到\n參數：\`${text || '(無)'}\``, _replyTarget_(conv));
       return ContentService.createTextOutput('🚀 收到，deploy 處理中…');
 
     case '/bug':
-      provider.postMessage(channel, `<@${user}> 🐛 bug 已送進 triage\n內容：\`${text || '(無)'}\``);
+      provider.postMessage(channel, `${provider.mention(user)} 🐛 bug 已送進 triage\n內容：\`${text || '(無)'}\``, _replyTarget_(conv));
       return ContentService.createTextOutput('🐛 收到，已送進 triage…');
 
     default:
@@ -178,7 +178,7 @@ function _routeMentionEvent_(event, provider) {
       provider.postWebhook(
         '🧪 @Alice test 測試\n' +
         '• 收到參數：`' + (args || '(無)') + '`\n' +
-        '• 觸發者：<@' + event.user + '>\n' +
+        '• 觸發者：' + provider.mention(event.user) + '\n' +
         '• 來源頻道：`' + event.channel + '`'
       );
       break;
@@ -204,15 +204,15 @@ function _routeMentionEvent_(event, provider) {
       break;
 
     case 'coding':
-      provider.postMessage(event.channel, `<@${event.user}> ✅ coding 任務已收到\n參數：\`${args || '(無)'}\``, event.thread_ts);
+      provider.postMessage(event.channel, `${provider.mention(event.user)} ✅ coding 任務已收到\n參數：\`${args || '(無)'}\``, _replyTarget_(conv));
       break;
 
     case 'deploy':
-      provider.postMessage(event.channel, `<@${event.user}> ✅ deploy 任務已收到\n參數：\`${args || '(無)'}\``, event.thread_ts);
+      provider.postMessage(event.channel, `${provider.mention(event.user)} ✅ deploy 任務已收到\n參數：\`${args || '(無)'}\``, _replyTarget_(conv));
       break;
 
     case 'bug':
-      provider.postMessage(event.channel, `<@${event.user}> 🐛 bug 已送進 triage\n內容：\`${args || '(無)'}\``, event.thread_ts);
+      provider.postMessage(event.channel, `${provider.mention(event.user)} 🐛 bug 已送進 triage\n內容：\`${args || '(無)'}\``, _replyTarget_(conv));
       break;
 
     // 不是已知指令 → 交給意圖識別（規則層）。
@@ -226,7 +226,7 @@ function _routeMentionEvent_(event, provider) {
 
 function _triggerPipelineTask_(pipelineType, jiraId, conv, user, provider) {
   if (!jiraId) {
-    provider.postMessage(conv.channel, `<@${user}> ⚠️ 請提供 Jira ID（例：\`@Alice ${pipelineType === 'ra-pipeline' ? 'ra' : 'sa'} VIPOP-12345\`）`, _replyTarget_(conv));
+    provider.postMessage(conv.channel, `${provider.mention(user)} ⚠️ 請提供 Jira ID（例：\`@Alice ${pipelineType === 'ra-pipeline' ? 'ra' : 'sa'} VIPOP-12345\`）`, _replyTarget_(conv));
     return;
   }
 
@@ -241,7 +241,7 @@ function _triggerPipelineTask_(pipelineType, jiraId, conv, user, provider) {
   if (trigCache.get(trigKey)) {
     provider.postMessage(
       conv.channel,
-      `<@${user}> ⏳ ${cleanJiraId} 的 ${pipelineType} 剛剛已經觸發過了。若確定要重跑，請稍待一分鐘。`,
+      `${provider.mention(user)} ⏳ ${cleanJiraId} 的 ${pipelineType} 剛剛已經觸發過了。若確定要重跑，請稍待一分鐘。`,
       _replyTarget_(conv)
     );
     return;
@@ -249,7 +249,7 @@ function _triggerPipelineTask_(pipelineType, jiraId, conv, user, provider) {
   trigCache.put(trigKey, '1', 60);
 
   // 1. 發送「任務受理」訊息，取得 thread 錨點
-  const acceptMsg = `🚀 收到 <@${user}> 的任務請求，正在啟動 ${pipelineType.toUpperCase()} (\`${cleanJiraId}\`)...`;
+  const acceptMsg = `🚀 收到 ${provider.mention(user)} 的任務請求，正在啟動 ${pipelineType.toUpperCase()} (\`${cleanJiraId}\`)...`;
   const anchoredConv = provider.postAccepted(conv, acceptMsg);
 
   // 2. 觸發 GitHub Actions Pipeline
@@ -262,7 +262,7 @@ function _triggerPipelineTask_(pipelineType, jiraId, conv, user, provider) {
   } else {
     provider.postMessage(
       anchoredConv.channel,
-      `⚠️ <@${user}> 觸發 GitHub Actions 失敗，請確認 GITHUB_TOKEN 配置與日誌。`,
+      `⚠️ ${provider.mention(user)} 觸發 GitHub Actions 失敗，請確認 GITHUB_TOKEN 配置與日誌。`,
       anchoredConv.thread
     );
   }

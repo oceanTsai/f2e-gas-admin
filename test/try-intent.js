@@ -99,6 +99,11 @@ const provider = {
     return threadJira ? [H(threadJira + ' ra-pipeline（1/2）')] : [];
   },
   postMessage: () => ({}),
+  // 這支工具只跑 classifyIntent、不派發，所以這兩個永遠不會被呼叫到。
+  // 放著是為了讓 mock 與真的 provider 介面對齊——哪天這裡改成走 routeByIntent，
+  // 缺了它們的症狀是 TypeError，而那會看起來像分類器壞了。
+  mention: (id) => (id ? '<@' + id + '>' : ''),
+  postIntentHelp: () => ({}),
 };
 
 const ACTION_EFFECT = {

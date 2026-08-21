@@ -8,6 +8,10 @@
 //  明確失敗遠優於靜默失敗。
 //
 //  實作時的對應關係（介面與 SlackProvider 相同）：
+//    mention         → `<users/{id}>`（Slack 是 `<@{id}>`）。空值要回空字串，
+//                      不是 `<users/>`——見 SlackProvider.mention 的說明
+//    postIntentHelp  → Cards v2；按鈕文字與 value 結構照 SlackProvider 那份，
+//                      因為 value 是與 parseInteraction 的私有契約
 //    postAccepted    → spaces.messages.create（取得 thread.name 當錨點）
 //    postDecision    → Cards v2 的 buttonList；button 帶 question_id / choice / jira_id / pipeline
 //    resolveDecision → spaces.messages.patch，把 buttonList 換成純文字（等同消除按鈕）
@@ -33,7 +37,13 @@ const GoogleChatProvider = {
   name: 'googlechat',
   implemented: false,
 
+  // mention 只是字串轉換、不需要任何 API，照樣 throw 是刻意的：implemented 為
+  // false 時 getProvider() 就會擋下來，這裡永遠不會被呼叫到。單獨實作它只會讓人
+  // 以為這個 provider「部分可用」，而那正是上一版靜默降級的來源。
+  mention:          function() { _googleChatNotImplemented_('mention'); },
+
   postAccepted:     function() { _googleChatNotImplemented_('postAccepted'); },
+  postIntentHelp:   function() { _googleChatNotImplemented_('postIntentHelp'); },
   resolveDecision:  function() { _googleChatNotImplemented_('resolveDecision'); },
   parseInteraction: function() { _googleChatNotImplemented_('parseInteraction'); },
   notifyTransient:  function() { _googleChatNotImplemented_('notifyTransient'); },

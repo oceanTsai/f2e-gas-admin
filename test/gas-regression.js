@@ -50,6 +50,23 @@ function mkEnv(seedProps) {
   };
 }
 
+// mock provider 的共用片段。core 呼叫的 provider 介面少一個方法，症狀就是
+// TypeError——集中一份，才不會每加一個測試節就漏掉。
+//
+// 刻意複製 SlackProvider.mention 的行為而不是引用它：多數測試節不載入
+// providers/slack.js（那會連帶拉進一堆網路呼叫），而斷言裡的 `<@U1>` 要對得上。
+const MENTION = (id) => (id ? '<@' + id + '>' : '');
+
+// core 只交給 provider「文字 ＋ 要不要附按鈕的快取鍵」，卡片由 provider 組
+// （見 providers/slack.js 的 postIntentHelp）。多數測試節只在意那則文字，
+// 所以轉呼 postMessage 就夠；驗按鈕的那一節（3f）另外接真的 SlackProvider。
+//
+// 這裡手算 replyTarget 而不用 _replyTarget_：那支住在 eval 出來的 GAS scope 裡，
+// 這個 helper 在 node 這一側，取不到它。
+const INTENT_HELP = function (conv, o) {
+  return this.postMessage(conv.channel, o.text, conv.thread || conv.replyTo || null, null);
+};
+
 function src(files) {
   return files.map(f => fs.readFileSync(path.join(ROOT, f), 'utf8')).join('\n');
 }
@@ -183,6 +200,123 @@ console.log('[0] GAS 全域 scope — 專案內所有檔案能否共存');
 
 
 // ══════════════════════════════════════════════════════════════════
+console.log('\n[0b] provider 邊界 — core 不准自己組平台語法');
+//
+// 這一節守的是「切 provider 時要不要動 core」。兩條都是實戰教訓的預防：
+//
+//   ① core/intent.js 曾經自己組 Slack Block Kit（_askOfferBlocks_），
+//      而同一個 codebase 的 messageDispatch 那側是交給 provider.postDecision。
+//      同一件事兩套做法，其中一套切平台時要改 core。
+//   ② `<@id>` 曾經散在 core 的三十幾處。Google Chat 的 mention 是 `<users/id>`，
+//      寫死的那一種在另一個平台會渲染成一段沒人看得懂的純文字——那個症狀看
+//      起來像 bug 而不像「provider 沒實作完」，所以最難查。
+//
+// 這種邊界靠 code review 守不住（加一行 postMessage(..., blocks) 太自然了），
+// 所以做成靜態檢查。
+// ══════════════════════════════════════════════════════════════════
+{
+  const NL = String.fromCharCode(10);
+
+  // 逐行剝掉註解。理由與 [0] 節相同：這份 codebase 的註解密度很高，
+  // 光是在註解裡提到 `<@U123>` 就會誤報，而誤報會讓人開始忽略這條檢查。
+  function stripComments(text) {
+    let inBlock = false;
+    return text.split(NL).map(function (line) {
+      if (inBlock) {
+        if (line.indexOf('*/') >= 0) inBlock = false;
+        return '';
+      }
+      if (/^\s*\/\*/.test(line)) {
+        if (line.indexOf('*/') < 0) inBlock = true;
+        return '';
+      }
+      return line.replace(/(^|[^:])\/\/.*$/, '$1');
+    }).join(NL);
+  }
+
+  // Slack Block Kit 的結構標記。core 出現任何一個，就是把卡片語法寫進了
+  // 業務邏輯——卡片長什麼樣是 provider 的事（見 providers/slack.js 的
+  // postIntentHelp，以及 messageDispatch 那側的 postDecision）。
+  const BLOCK_KIT = ["type: 'section'", "type: 'actions'", "type: 'button'",
+                     'mrkdwn', 'plain_text', 'action_id', 'block_id'];
+
+  // 允許保留 `<@` 的兩行。兩者都不是「顯示給人看的字串」：
+  const MENTION_OK = [
+    // progress.json 的 answered_by 是跨專案契約（augma 的 update-progress.sh
+    // 會寫它、_alreadyAnswered_ 會讀它），格式不能單方面改。
+    "const answeredBy = '<@' + user + '>'",
+    // 入向解析：Slack 傳回的原文帶著 mention 前綴，樣式要允許它。
+    //
+    // 它還留在 core 是因為入向事件解析整層都還沒抽進 provider 介面
+    // （doPost 直接吃 e.parameter.payload / body.event_id / app_mention），
+    // 而那個介面的形狀取決於 GAS 對 Google Chat 的原生觸發長什麼樣。
+    // 抽的時候這一行要跟著改成允許 `<users/…>`。
+    'const ASK_TRIGGER_IN_ROOT_RE'
+  ];
+
+  const CORE_DIR = path.join(ROOT, 'slackBotProxy', 'core');
+  const coreFiles = [];
+  (function walk(d) {
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      const full = path.join(d, e.name);
+      if (e.isDirectory()) walk(full);
+      else if (/\.js$/.test(e.name)) coreFiles.push(full);
+    }
+  })(CORE_DIR);
+  coreFiles.sort();
+
+  const kitHits = [], mentionHits = [];
+  for (const f of coreFiles) {
+    const rel = path.relative(ROOT, f);
+    const lines = stripComments(fs.readFileSync(f, 'utf8')).split(NL);
+    lines.forEach(function (line, i) {
+      const where = rel + ':' + (i + 1);
+      for (const tok of BLOCK_KIT) {
+        if (line.indexOf(tok) >= 0) kitHits.push(where + ' → ' + tok);
+      }
+      if (line.indexOf('<@') >= 0 && !MENTION_OK.some(a => line.indexOf(a) >= 0)) {
+        mentionHits.push(where + ' → ' + line.trim().slice(0, 60));
+      }
+    });
+  }
+
+  assert.strictEqual(kitHits.length, 0,
+    'core 出現 Block Kit 語法（卡片該由 provider 組）：' + NL + kitHits.join(NL));
+  ok('core 沒有任何 Block Kit 語法（' + coreFiles.length + ' 檔）');
+
+  assert.strictEqual(mentionHits.length, 0,
+    'core 自己組了 mention（請改用 provider.mention）：' + NL + mentionHits.join(NL));
+  ok('core 一律走 provider.mention（只有 answered_by 與入向樣式例外）');
+
+  // ── GoogleChatProvider 的 stub 要涵蓋 SlackProvider 的公開介面 ──
+  //
+  // 這條防的是「加了新 provider 方法，但忘了同步另一份 stub」。那個漏洞的症狀
+  // 正是 googleChat.js 檔頭在講的靜默失敗：切過去之後某一條路徑呼叫到
+  // undefined，而它可能好幾天才被走到一次。
+  //
+  // 只比對公開 key：`_` 開頭的是各 provider 的私有輔助（_askOfferBlocks_、
+  // _fetchThreadReplies_），本來就不必對齊。
+  for (const proj of ['slackBotProxy', 'messageDispatch']) {
+    const sandbox = { PropertiesService: null, UrlFetchApp: null, console: console,
+                      _replyTarget_: () => null };
+    require('vm').createContext(sandbox);
+    require('vm').runInContext(
+      fs.readFileSync(path.join(ROOT, proj, 'providers', 'slack.js'), 'utf8') + NL +
+      fs.readFileSync(path.join(ROOT, proj, 'providers', 'googleChat.js'), 'utf8') + NL +
+      'this.__slack = SlackProvider; this.__gchat = GoogleChatProvider;', sandbox);
+
+    const pub = o => Object.keys(o).filter(k => k.charAt(0) !== '_');
+    const missing = pub(sandbox.__slack).filter(k => pub(sandbox.__gchat).indexOf(k) < 0);
+    assert.strictEqual(missing.length, 0,
+      proj + '/providers/googleChat.js 少了 stub（切過去會靜默呼叫到 undefined）：' +
+      missing.join('、'));
+    ok(proj + '：GoogleChat stub 涵蓋 Slack 的全部 ' +
+       pub(sandbox.__slack).length + ' 個公開方法');
+  }
+}
+
+
+// ══════════════════════════════════════════════════════════════════
 console.log('\n[1] slackBotProxy — progress.json 查詢輔助');
 // ══════════════════════════════════════════════════════════════════
 {
@@ -245,10 +379,12 @@ console.log('\n[2] slackBotProxy — 意圖識別規則');
   let rootCalls = 0;
   const provider = {
     name: 'slack',
+    mention: MENTION,
+    postIntentHelp: INTENT_HELP,
     fetchThreadRoot: () => { rootCalls++; return '\u{1F680} 收到 <@U1> 的任務請求，正在啟動 RA-PIPELINE (VIPOP-46703)...'; },
     postMessage: () => ({}),
   };
-  const providerNoThread = { name:'slack', fetchThreadRoot: () => '', postMessage: () => ({}) };
+  const providerNoThread = { name:'slack', mention: MENTION, postIntentHelp: INTENT_HELP, fetchThreadRoot: () => '', postMessage: () => ({}) };
 
   eval(src(INTENT_SRC) + `
   const IN  = { provider:'slack', channel:'C1', thread:'1700.1' };
@@ -369,7 +505,7 @@ console.log('\n[2] slackBotProxy — 意圖識別規則');
   ok('未命中 → 由路由層記錄語料（日後設計 LLM prompt 的素材）');
 
   // 反查失敗是基礎設施問題，不是「人這樣講話規則接不住」，不該洗版語料
-  const failingProvider = { name:'slack', fetchThreadRoot: () => null, postMessage: () => ({}) };
+  const failingProvider = { name:'slack', mention: MENTION, postIntentHelp: INTENT_HELP, fetchThreadRoot: () => null, postMessage: () => ({}) };
   PropertiesService.getScriptProperties().deleteProperty('intent_misses');
   routeByIntent('隨便講', { provider:'slack', channel:'C1', thread:'7777.7' }, 'U1', failingProvider);
   assert.strictEqual(PropertiesService.getScriptProperties().getProperty('intent_misses'), null,
@@ -393,7 +529,7 @@ console.log('\n[2] slackBotProxy — 意圖識別規則');
   PropertiesService.getScriptProperties().deleteProperty('INTENT_CLASSIFIER');
   ok('分類器工廠：預設 rules，未實作／未知一律拋錯（設定錯誤要當場知道）');
 
-  assert.ok(_intentHelpText_('U1', { restate:'' }).split(String.fromCharCode(10)).length > 5);
+  assert.ok(_intentHelpText_(provider, 'U1', { restate:'' }).split(String.fromCharCode(10)).length > 5);
   ok('help 文字可組出');
   `);
 }
@@ -410,6 +546,8 @@ console.log('\n[3] slackBotProxy — thread 反查與 dispatch 安全性');
   let rootCalls = 0;
   const provider = {
     name: 'slack',
+    mention: MENTION,
+    postIntentHelp: INTENT_HELP,
     fetchThreadRoot: () => { rootCalls++; return '\u{1F680} 正在啟動 RA-PIPELINE (VIPOP-46703)...'; },
     postMessage: (ch, text) => { posted.push(text); return {}; },
   };
@@ -650,6 +788,8 @@ console.log('\n[3d] slackBotProxy — 批次派發與去重（與按鈕共用同
   let progressStub = null;
   const provider = {
     name: 'slack',
+    mention: MENTION,
+    postIntentHelp: INTENT_HELP,
     fetchThreadRoot: () => '\u{1F680} 正在啟動 RA-PIPELINE (VIPOP-46703)...',
     postMessage: (ch, text) => { posted.push(text); return {}; },
   };
@@ -747,6 +887,8 @@ console.log('\n[3e] slackBotProxy — 自由提問（ask）');
   let dispatchOk = true;
   const provider = {
     name: 'slack',
+    mention: MENTION,
+    postIntentHelp: INTENT_HELP,
     fetchThreadRoot: () => '',
     postMessage: (ch, text) => { posted.push(text); return { ts: '1700.9' }; },
     postAccepted: (conv, text) => {
@@ -897,6 +1039,8 @@ console.log('\n[3e-2] slackBotProxy — 續問接續同一支 ask 分支');
   const B = t => ({ text: t, bot: true });    // Alice 自己發的
   const provider = {
     name: 'slack',
+    mention: MENTION,
+    postIntentHelp: INTENT_HELP,
     fetchThreadTexts: () => { rootCalls++; return threadMsgs; },
     postMessage: (ch, text) => { posted.push(text); return { ts: '1700.9' }; },
     postAccepted: (conv, text) => {
@@ -1075,6 +1219,8 @@ console.log('\n[3e-4] slackBotProxy — thread 的歸屬：ask 串 vs 任務串'
   const B = t => ({ text: t, bot: true });
   const provider = {
     name: 'slack',
+    mention: MENTION,
+    postIntentHelp: INTENT_HELP,
     fetchThreadTexts: () => { fetchCalls++; return threadMsgs; },
     postMessage: (ch, text) => { posted.push(text); return { ts: '1700.9' }; },
     postAccepted: (conv, text) => {
@@ -1261,6 +1407,7 @@ console.log('\n[3f] slackBotProxy — 反問時的「當成一般提問送出」
   const posted = [], dispatched = [], transient = [];
   const provider = {
     name: 'slack',
+    mention: MENTION,
     fetchThreadRoot: () => '',
     postMessage: (ch, text, thread, blocks) => { posted.push({ text: text, blocks: blocks }); return { ts: '1700.9' }; },
     postAccepted: (conv, text) => { posted.push({ text: text, blocks: null });
@@ -1272,6 +1419,14 @@ console.log('\n[3f] slackBotProxy — 反問時的「當成一般提問送出」
   // 這一節要驗 parseInteraction 的相容性，所以連 provider 一起載入
   eval(src(INTENT_SRC.concat(['slackBotProxy/providers/slack.js'])) + `
   dispatchAsk = function (prompt, uid, conv) { dispatched.push(prompt); return true; };
+
+  // 這一節驗的是按鈕本身，所以 blocks 交給**真的** SlackProvider 去組：
+  // value 的 2000 字上限、kind / k 的結構都是它的責任（core 只給 offerKey）。
+  // 在 eval 內覆寫是必要的——mock 住在 node 這一側，取不到 SlackProvider。
+  provider.postIntentHelp = function (conv, o) {
+    posted.push({ text: o.text, blocks: SlackProvider._askOfferBlocks_(o.offerKey) });
+    return { ts: '1700.9' };
+  };
 
   const OUT = { provider:'slack', channel:'C9', thread:null };
   const findBtn = () => {
@@ -1454,7 +1609,7 @@ console.log('[3b] slackBotProxy — 收到出向請求要明確報錯，不能�
 {
   const env = mkEnv();
   Object.assign(global, env.globals);
-  global.getProvider = () => ({ name: 'slack', postMessage: () => ({}) });
+  global.getProvider = () => ({ name: 'slack', mention: MENTION, postIntentHelp: INTENT_HELP, postMessage: () => ({}) });
 
   eval(src(['slackBotProxy/core/conv.js', 'slackBotProxy/core/github.js',
             'slackBotProxy/core/decision.js', 'slackBotProxy/core/intent.js',

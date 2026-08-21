@@ -168,42 +168,37 @@ function routeByIntent(text, conv, userId, provider) {
       // ask thread 內的追問是靠「這串受理過」豁免密語的，不傳就會在最需要
       // 這顆按鈕的地方（追問時只打了「再試一次」）反而不附。
       const offerAsk = (intent.matchedBy === 'no-match') && _askAllowed_(text, conv, provider);
-      const blocks = offerAsk ? _askOfferBlocks_(text, conv, userId) : null;
-      provider.postMessage(conv.channel, _intentHelpText_(userId, intent), _replyTarget_(conv), blocks);
+      provider.postIntentHelp(conv, {
+        text: _intentHelpText_(provider, userId, intent),
+        // 空字串＝不附按鈕。卡片長什麼樣、value 怎麼編碼都是 provider 的事
+        // （見 providers/slack.js 的 postIntentHelp）——core 只決定「要不要給」。
+        offerKey: offerAsk ? _stashAskOffer_(text) : ''
+      });
     }
   }
 }
 
 
-// 按鈕的 value 上限 2000 字元，而使用者那句話可能很長——所以 value 只放
-// 快取鍵，原句存 CacheService。TTL 15 分鐘：這是「看到反問、決定要不要送」
-// 的合理猶豫時間，超過就讓他重講一次，而不是送出一句他早就忘了的話。
+// 原句存 CacheService、只把快取鍵交給 provider。
+//
+// TTL 15 分鐘：這是「看到反問、決定要不要送」的合理猶豫時間，超過就讓他重講
+// 一次，而不是送出一句他早就忘了的話。這是業務決策，所以留在 core——按鈕長
+// 什麼樣、value 怎麼編碼（上限 2000 字元，所以只放得下快取鍵）才是 provider
+// 的事，見 providers/slack.js 的 _askOfferBlocks_。
 const ASK_OFFER_TTL = 900;
 
-function _askOfferBlocks_(rawText, conv, userId) {
+function _stashAskOffer_(rawText) {
   const key = 'askq_' + Utilities.getUuid();
   CacheService.getScriptCache().put(key, String(rawText || ''), ASK_OFFER_TTL);
-  return [
-    { type: 'section', text: { type: 'mrkdwn', text: '_或者，我可以直接當成一般提問去查：_' } },
-    {
-      type: 'actions',
-      elements: [{
-        type: 'button',
-        text: { type: 'plain_text', text: '\uD83D\uDD0D 當成一般提問送出', emoji: true },
-        action_id: 'ask_confirm',
-        // kind 是必要的：parseInteraction 以前靠 question_id 判斷這是決策按鈕，
-        // 多一種按鈕之後就分不出來了（見 handleInteraction 開頭的分岔）
-        value: JSON.stringify({ kind: 'ask_confirm', k: key })
-      }]
-    }
-  ];
+  return key;
 }
 
 
-function _intentHelpText_(userId, intent) {
+function _intentHelpText_(provider, userId, intent) {
+  const who = provider.mention(userId);
   const head = intent.restate
-    ? `<@${userId}> ${intent.restate}`
-    : `<@${userId}> 這句我沒把握，怕猜錯跑錯流程，先跟你確認。`;
+    ? `${who} ${intent.restate}`
+    : `${who} 這句我沒把握，怕猜錯跑錯流程，先跟你確認。`;
 
   return [
     head,

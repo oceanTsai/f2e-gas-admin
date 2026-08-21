@@ -17,6 +17,18 @@ const THREAD_FETCH_MEMO = {};
 const SlackProvider = {
   name: 'slack',
 
+  // 0. user id → 這個平台的 mention 語法
+  //
+  // core 不可以自己組這個字串。Slack 是 `<@U123>`、Google Chat 是 `<users/123>`，
+  // 而寫死的那一種在另一個平台上會渲染成一段沒人看得懂的純文字——那個症狀看起來
+  // 像 bug，不像「provider 還沒實作完」，所以最難查。
+  //
+  // ⚠️ 空值回**空字串**而不是 `<@>`。ASK_OWNER 沒設時就是這個情況（見 core/ask.js
+  //    的說明）：那時該完全不提人，而不是生出一個壞掉的 mention。
+  mention: function (userId) {
+    return userId ? '<@' + userId + '>' : '';
+  },
+
   // 1. 發送任務受理訊息並回傳補齊 thread 錨點的 conversation
   postAccepted: function(conv, text) {
     const channel = conv.channel;
@@ -138,7 +150,7 @@ const SlackProvider = {
       choice: actionData.choice,
       jiraId: actionData.jira_id,
       pipeline: actionData.pipeline || 'sa-pipeline',
-      user: userId ? `<@${userId}>` : user,
+      user: userId ? this.mention(userId) : user,
       userId: userId,
       conversation: {
         provider: 'slack',
@@ -174,6 +186,46 @@ const SlackProvider = {
     } catch (err) {
       console.error('notifyTransient 失敗:', err);
     }
+  },
+
+  // 6. 意圖沒接住時的求助訊息，可選附帶一顆「當成一般提問送出」的按鈕
+  //
+  // 為什麼卡片由 provider 組、而不是 core 傳一份現成的 blocks 進來：
+  //   ① Block Kit / Cards v2 的語法是平台細節
+  //   ② 按鈕 value 的結構（kind / k）是與 parseInteraction 的**私有契約**，
+  //      兩邊住在同一個檔案才不會漂移
+  // core 只決定兩件事：要不要給這顆按鈕、原句存在哪個快取鍵。
+  //
+  // 這個分工與 messageDispatch/core/outbound.js ↔ postDecision 完全一致。
+  // 以前 core/intent.js 自己組 blocks，等於同一個 codebase 裡有兩套做法，
+  // 而其中一套在切 provider 時要改 core。
+  postIntentHelp: function (conv, o) {
+    return this.postMessage(
+      conv.channel, o.text, _replyTarget_(conv), this._askOfferBlocks_(o.offerKey)
+    );
+  },
+
+  // offerKey 為空＝不附按鈕（沒有密語的人按了也會被擋，附一顆按不動的按鈕
+  // 只會讓人以為壞了）。
+  //
+  // ⚠️ value 上限 2000 字元，而使用者那句話可能很長——所以只放快取鍵，
+  //    原句由 core 存進 CacheService（TTL 是業務決策，見 core/intent.js）。
+  _askOfferBlocks_: function (offerKey) {
+    if (!offerKey) return null;
+    return [
+      { type: 'section', text: { type: 'mrkdwn', text: '_或者，我可以直接當成一般提問去查：_' } },
+      {
+        type: 'actions',
+        elements: [{
+          type: 'button',
+          text: { type: 'plain_text', text: '\uD83D\uDD0D 當成一般提問送出', emoji: true },
+          action_id: 'ask_confirm',
+          // kind 是必要的：parseInteraction 以前靠 question_id 判斷這是決策按鈕，
+          // 多一種按鈕之後就分不出來了（見 handleInteraction 開頭的分岔）
+          value: JSON.stringify({ kind: 'ask_confirm', k: offerKey })
+        }]
+      }
+    ];
   },
 
   // Slack API 封裝

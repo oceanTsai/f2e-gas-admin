@@ -142,7 +142,7 @@ function _applySingle_(items, ctx) {
     question = progress ? _findQuestion_(progress, questionId) : null;
     if (progress && !question) {
       provider.postMessage(conv.channel,
-        '<@' + user + '> 找不到 ' + jiraId + ' 的 ' + questionId + ' 這一題。', _replyTarget_(conv));
+        provider.mention(user) + ' 找不到 ' + jiraId + ' 的 ' + questionId + ' 這一題。', _replyTarget_(conv));
       return;
     }
     // progress 讀不到（產物還沒 push）但有明確題號 → 照樣 dispatch，只是跳過閘門
@@ -151,7 +151,7 @@ function _applySingle_(items, ctx) {
   } else {
     if (!progress) {
       provider.postMessage(conv.channel,
-        '<@' + user + '> 暫時讀不到 ' + jiraId +
+        provider.mention(user) + ' 暫時讀不到 ' + jiraId +
         ' 的流程狀態，請改成明確指定題號：`@Alice answer Q-001 <你的答覆>`',
         _replyTarget_(conv));
       return;
@@ -162,7 +162,7 @@ function _applySingle_(items, ctx) {
     });
     if (pending.length === 0) {
       provider.postMessage(conv.channel,
-        '<@' + user + '> ' + jiraId + ' 目前沒有待回覆的問題。', _replyTarget_(conv));
+        provider.mention(user) + ' ' + jiraId + ' 目前沒有待回覆的問題。', _replyTarget_(conv));
       return;
     }
     question = pending[0];
@@ -178,7 +178,7 @@ function _applySingle_(items, ctx) {
   // 這些更具體的訊息有機會先出來。
   if (!ctx.pipeline) {
     provider.postMessage(conv.channel,
-      '<@' + user + '> 讀不到 ' + jiraId + ' 要接續哪條 pipeline，沒辦法安全地用文字接續。' +
+      provider.mention(user) + ' 讀不到 ' + jiraId + ' 要接續哪條 pipeline，沒辦法安全地用文字接續。' +
       '請直接點卡片上的按鈕（按鈕本身帶著這個資訊）。', _replyTarget_(conv));
     return;
   }
@@ -189,7 +189,7 @@ function _applySingle_(items, ctx) {
   // 若允許文字回覆，使用者打「先不要跑」反而會讓下一階段跑起來，與意圖完全相反。
   if (question && question.resume_action === 'complete') {
     provider.postMessage(conv.channel,
-      '<@' + user + '> ℹ️ ' + questionId +
+      provider.mention(user) + ' ℹ️ ' + questionId +
       ' 是放行閘門，請直接點卡片上的按鈕。' + '\u000a' +
       '若還不想放行，就先不要動作——卡片會留在這裡等你。' + '\u000a' +
       '需要補充說明時請直接在 thread 討論，那不會觸發任何流程。',
@@ -202,14 +202,27 @@ function _applySingle_(items, ctx) {
   const dup = _alreadyAnswered_(jiraId, questionId, question);
   if (dup.answered) {
     provider.postMessage(conv.channel,
-      '<@' + user + '> ℹ️ ' + questionId + ' 已由 ' + dup.by + ' 回答，本次回覆不生效。',
+      provider.mention(user) + ' ℹ️ ' + questionId + ' 已由 ' + dup.by + ' 回答，本次回覆不生效。',
       _replyTarget_(conv));
     return;
   }
-  cache.put(cacheKey, '<@' + user + '>', ANSWER_CACHE_TTL);
+  // ⚠️ 這裡刻意**不用** provider.mention()——它存的是「誰回答的」，而那個值會
+  //    一路寫進 progress.json 的 answered_by（augma 的 update-progress.sh），
+  //    所以是跨專案契約，不是我們自己的顯示字串。
+  //
+  //    快取值必須與 answered_by 同格式：_alreadyAnswered_（core/decision.js）把
+  //    「快取命中」與「progress.json 說已答」當成同一種東西回傳同一個 by 欄位，
+  //    兩邊格式不一致的話，顯示出來的「已由 X 回答」會時而是 mention、時而是
+  //    一串 raw id。
+  //
+  //    正解是存 raw user id、顯示時才 mention()，但那要 augma 那側一起改，而且
+  //    既有的 progress.json 裡已經躺著舊格式的值——所以需要一個「兩種格式都認得」
+  //    的過渡期，不能單方面改這一行。切 provider 時一併處理。
+  const answeredBy = '<@' + user + '>';
+  cache.put(cacheKey, answeredBy, ANSWER_CACHE_TTL);
 
   // 1. 先觸發 resume（唯一不可失敗的動作）
-  const ok = dispatchResume(jiraId, ctx.pipeline, questionId, answerText, '<@' + user + '>');
+  const ok = dispatchResume(jiraId, ctx.pipeline, questionId, answerText, answeredBy);
 
   // 2. 刻意**不動原卡片**：文字回覆走 app_mention 事件，拿不到 payload.message.blocks，
   //    只能整張替換——那會把同一張卡片上其他題的按鈕一起吃掉。
@@ -225,11 +238,11 @@ function _applySingle_(items, ctx) {
       }
     }
     provider.postMessage(conv.channel,
-      '✅ 已收下 <@' + user + '> 對 ' + questionId + ' 的回覆。' + tail, _replyTarget_(conv));
+      '✅ 已收下 ' + provider.mention(user) + ' 對 ' + questionId + ' 的回覆。' + tail, _replyTarget_(conv));
   } else {
     cache.remove(cacheKey);   // dispatch 失敗要讓人能重試
     provider.postMessage(conv.channel,
-      '⚠️ <@' + user + '> 回覆已記錄，但觸發 GitHub Actions 失敗，' +
+      '⚠️ ' + provider.mention(user) + ' 回覆已記錄，但觸發 GitHub Actions 失敗，' +
       '請確認 GITHUB_TOKEN 或稍後重試。', _replyTarget_(conv));
   }
 }
@@ -254,7 +267,7 @@ function _applyBatch_(items, ctx) {
 
   if (!ctx.pipeline) {
     provider.postMessage(conv.channel,
-      '<@' + user + '> 讀不到 ' + jiraId + ' 要接續哪條 pipeline，沒辦法安全地用文字接續。' +
+      provider.mention(user) + ' 讀不到 ' + jiraId + ' 要接續哪條 pipeline，沒辦法安全地用文字接續。' +
       '請直接點卡片上的按鈕（按鈕本身帶著這個資訊）。', _replyTarget_(conv));
     return;
   }
@@ -266,7 +279,7 @@ function _applyBatch_(items, ctx) {
 
   if (already.length === qids.length) {
     provider.postMessage(conv.channel,
-      '<@' + user + '> ℹ️ 這 ' + qids.length + ' 題稍早都已經收下過了（' +
+      provider.mention(user) + ' ℹ️ 這 ' + qids.length + ' 題稍早都已經收下過了（' +
       qids.join('、') + '），本次貼上不重複送出。', _replyTarget_(conv));
     return;
   }
@@ -274,14 +287,16 @@ function _applyBatch_(items, ctx) {
   const cut = _truncateUtf8_(ctx.rawBatch, BATCH_PAYLOAD_MAX_BYTES);
 
   // 先寫快取再 dispatch：順序反過來的話，dispatch 與寫快取之間又是一個競態窗口。
-  qids.forEach(function (qid) { cache.put(_answerKey_(jiraId, qid), '<@' + user + '>', ANSWER_CACHE_TTL); });
+  // 與單題同一個理由：這是 progress.json 的 answered_by，不是顯示字串。
+  const answeredBy = '<@' + user + '>';
+  qids.forEach(function (qid) { cache.put(_answerKey_(jiraId, qid), answeredBy, ANSWER_CACHE_TTL); });
 
-  const ok = dispatchResumeBatch(jiraId, ctx.pipeline, cut.text, '<@' + user + '>');
+  const ok = dispatchResumeBatch(jiraId, ctx.pipeline, cut.text, answeredBy);
 
   if (!ok) {
     qids.forEach(function (qid) { cache.remove(_answerKey_(jiraId, qid)); });
     provider.postMessage(conv.channel,
-      '⚠️ <@' + user + '> 觸發 GitHub Actions 失敗，這份回覆沒有送出。' +
+      '⚠️ ' + provider.mention(user) + ' 觸發 GitHub Actions 失敗，這份回覆沒有送出。' +
       '請確認 GITHUB_TOKEN 或稍後再貼一次。', _replyTarget_(conv));
     return;
   }
@@ -289,7 +304,7 @@ function _applyBatch_(items, ctx) {
   // 這裡刻意**不報數字**。GAS 只撈了題號，沒有配對答案、也沒查閘門，
   // 所以它不知道實際會寫進幾題。有資訊的那則由 augma 在寫完之後發
   // （notify-answer-result.sh → messageDispatch 的 answer_result）。
-  const lines = ['\uD83D\uDCE5 已收下 <@' + user + '> 的批次回覆（' + qids.length +
+  const lines = ['\uD83D\uDCE5 已收下 ' + provider.mention(user) + ' 的批次回覆（' + qids.length +
                  ' 題），正在套用到 ' + jiraId + '…'];
 
   if (already.length) {

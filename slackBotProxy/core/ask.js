@@ -127,7 +127,7 @@ function handleAskRequest(args, conv, user, provider) {
   ].join('\u000a');
 
   if (!prompt) {
-    provider.postMessage(conv.channel, '<@' + user + '> ⚠️ 要問什麼？' + '\u000a' + USAGE, _replyTarget_(conv));
+    provider.postMessage(conv.channel, provider.mention(user) + ' ⚠️ 要問什麼？' + '\u000a' + USAGE, _replyTarget_(conv));
     return;
   }
 
@@ -146,21 +146,21 @@ function handleAskRequest(args, conv, user, provider) {
     // 沒設就不提人，只說去問專案負責人——比指向一個不存在的人好。
     const owner = PropertiesService.getScriptProperties().getProperty('ASK_OWNER');
     provider.postMessage(conv.channel,
-      '<@' + user + '> \uD83D\uDD12 自由提問還在測試中，目前只開放給知道通關密語的人。' +
-      (owner ? ('需要用的話找 <@' + owner + '> 拿。') : '需要用的話找專案負責人拿。'),
+      provider.mention(user) + ' \uD83D\uDD12 自由提問還在測試中，目前只開放給知道通關密語的人。' +
+      (owner ? ('需要用的話找 ' + provider.mention(owner) + ' 拿。') : '需要用的話找專案負責人拿。'),
       _replyTarget_(conv));
     return;
   }
   const asked = gate.prompt;
   if (!asked) {
     // 只打了密語、沒有問題本文
-    provider.postMessage(conv.channel, '<@' + user + '> \u26a0\ufe0f 密語對了，但你還沒說要問什麼。' + '\u000a' + USAGE, _replyTarget_(conv));
+    provider.postMessage(conv.channel, provider.mention(user) + ' \u26a0\ufe0f 密語對了，但你還沒說要問什麼。' + '\u000a' + USAGE, _replyTarget_(conv));
     return;
   }
 
   if (asked.length > ASK_MAX_CHARS) {
     provider.postMessage(conv.channel,
-      '<@' + user + '> ⚠️ 問題太長了（' + asked.length + ' 字，上限 ' + ASK_MAX_CHARS + '）。' +
+      provider.mention(user) + ' ⚠️ 問題太長了（' + asked.length + ' 字，上限 ' + ASK_MAX_CHARS + '）。' +
       '如果是要我看一整份檔案或 log，直接說它的路徑就好，我自己會去讀。', _replyTarget_(conv));
     return;
   }
@@ -169,7 +169,7 @@ function handleAskRequest(args, conv, user, provider) {
   const throttleKey = 'ask_' + user;
   if (cache.get(throttleKey)) {
     provider.postMessage(conv.channel,
-      '<@' + user + '> ⏳ 你剛剛才問過一題，等前一題回來再問下一題。' +
+      provider.mention(user) + ' ⏳ 你剛剛才問過一題，等前一題回來再問下一題。' +
       '（每題會佔用一台 runner，而 RA / SA 的工作要排在後面）', _replyTarget_(conv));
     return;
   }
@@ -190,8 +190,8 @@ function handleAskRequest(args, conv, user, provider) {
   // 但反查失敗時他會直接從這句話看出來，不必等幾分鐘後收到一則答非所問的回覆。
   const anchored = provider.postAccepted(conv,
     (continueId
-      ? '🔍 收到 <@' + user + '> 的追問，接續這個 thread 的上文，正在查…'
-      : '🔍 收到 <@' + user + '> 的提問，正在查…') + '\u000a' +
+      ? '🔍 收到 ' + provider.mention(user) + ' 的追問，接續這個 thread 的上文，正在查…'
+      : '🔍 收到 ' + provider.mention(user) + ' 的提問，正在查…') + '\u000a' +
     '_這需要幾分鐘。查完會回在這則底下。_');
 
   const ok = dispatchAsk(asked, user, anchored, continueId);
@@ -201,7 +201,7 @@ function handleAskRequest(args, conv, user, provider) {
     cache.put(throttleKey, '1', ASK_THROTTLE_SEC);
   } else {
     provider.postMessage(anchored.channel,
-      '⚠️ <@' + user + '> 觸發 GitHub Actions 失敗，這題沒有送出。' +
+      '⚠️ ' + provider.mention(user) + ' 觸發 GitHub Actions 失敗，這題沒有送出。' +
       '請確認 GITHUB_TOKEN 或稍後再問一次。', anchored.thread);
   }
 }
