@@ -9,39 +9,48 @@
 const ARCHIVE_FOLDER_ID = '1VgZA9Y1P6w5GafKDQPgXTZ-XpfpzBtsc';  // 專門放這些頁面的資料夾
 
 function doGet(e) {
-  const segments = (e.parameter.p || '').split('/').filter((s) => s !== '');
+  const path = (e && e.parameter && e.parameter.p) || '';
+  const segments = path.split('/').filter((s) => s !== '');
   const fileName = segments.pop();
   // 檔案所在的資料夾路徑：改寫相對連結時要把它接回去
   const folderPath = segments.join('/');
 
-  const folder = segments.reduce((acc, name) => {
-    let next = null;
-    if (acc !== null) {
-      const subs = acc.getFoldersByName(name);
-      if (subs.hasNext()) {
-        next = subs.next();
+  try {
+    const folder = segments.reduce((acc, name) => {
+      let next = null;
+      if (acc !== null) {
+        const subs = acc.getFoldersByName(name);
+        if (subs.hasNext()) {
+          next = subs.next();
+        }
+      }
+      return next;
+    }, DriveApp.getFolderById(ARCHIVE_FOLDER_ID));
+
+    let file = null;
+    if (folder !== null && fileName) {
+      const files = folder.getFilesByName(fileName);
+      if (files.hasNext()) {
+        file = files.next();
       }
     }
-    return next;
-  }, DriveApp.getFolderById(ARCHIVE_FOLDER_ID));
 
-  let file = null;
-  if (folder !== null && fileName) {
-    const files = folder.getFilesByName(fileName);
-    if (files.hasNext()) {
-      file = files.next();
+    if (file !== null) {
+      const html = file.getBlob().getDataAsString('UTF-8');
+      return HtmlService.createHtmlOutput(rewriteLinks_(html, folderPath))
+        .setTitle(file.getName());
     }
+  } catch (err) {
+    // 以存取者身分執行時，沒有 Drive 權限的人一開啟就會在 DriveApp 這裡拋例外，
+    // 這是常態路徑而非意外。不讓它冒到最上層的理由有二：
+    //   1. GAS 的原始錯誤頁會把 ARCHIVE_FOLDER_ID 顯示出來，沒必要送給無權限的人。
+    //   2. 「無權限」與「不存在」刻意回同一句話，否則兩者的差異可以被拿來
+    //      逐一試誤、探測哪些路徑真的存在。
+    // 真正的原因寫進 Cloud Logging，排查時用 clasp logs 看，使用者端看不到。
+    console.error('doGet 讀取失敗 p=' + path + '：' + ((err && err.message) || err));
   }
 
-  let output;
-  if (file === null) {
-    output = HtmlService.createHtmlOutput('<h1>找不到這個頁面</h1>');
-  } else {
-    const html = file.getBlob().getDataAsString('UTF-8');
-    output = HtmlService.createHtmlOutput(rewriteLinks_(html, folderPath))
-      .setTitle(file.getName());
-  }
-  return output;
+  return HtmlService.createHtmlOutput('<h1>找不到這個頁面</h1>');
 }
 
 /**
