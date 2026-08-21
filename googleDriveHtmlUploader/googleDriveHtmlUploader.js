@@ -43,12 +43,14 @@
  *   "files": [ { "name": "VIPOP-12345-overview.html", "content": "<!doctype html>..." } ]
  * }
  *
- * 成功 200 { "ok": true, "folder_id": "1AbC...",
- *            "files": [ { "name": "...", "file_id": "..." } ], "warnings": [ "..." ] }
+ * 成功 200 { "ok": true, "folder_id": "1AbC...", "folder_name": "VIPOP-12345",
+ *            "files": [ { "name": "...", "file_id": "..." } ] }
  * 失敗 200 { "error": "訊息" }   ← GAS 無法自訂 HTTP 狀態碼，錯誤一律走 error 欄位
  *
- * 檢視網址由呼叫端組成：{PREVIEWER}/exec?p=<folder_id>/<name>
- * file_id 只用來確認寫入成功，previewer 不吃它。
+ * 檢視網址由呼叫端組成：{PREVIEWER}/exec?p=<folder_name>/<name>
+ * 用的是 folder_name 不是 folder_id——previewer 從自己的 ARCHIVE_FOLDER_ID 起步，
+ * 用 getFoldersByName／getFilesByName 按「名稱」逐層往下找，不吃 Drive ID。
+ * folder_id 與 file_id 只用來確認寫入成功，previewer 兩個都不吃。
  *
  * **密鑰本身永遠不會出現在請求裡**——網址只帶簽章。簽章綁死這一份 body，
  * 沒有密鑰就偽造不出下一個，因此它進執行記錄也無妨。
@@ -126,9 +128,10 @@ function doPost(e) {
       out.push({ name: f.name, file_id: upsert_(folder, f.name, f.content) });
     }
 
-    // folder_id 是呼叫端組檢視網址的依據（?p=<folder_id>/<檔名>）。
-    // previewer 以存取者身分執行，用 ID 直接定位——它對封存根目錄沒有權限，
-    // 沒辦法從根往下逐層找名字。
+    // folder_name 才是呼叫端組檢視網址的依據（?p=<資料夾名>/<檔名>）。
+    // previewer 以存取者身分執行，從自己的 ARCHIVE_FOLDER_ID 起步按名稱逐層往下找，
+    // 不吃 Drive ID——所以那個常數兩邊必須指向同一個資料夾。
+    // folder_id 一併回傳純粹是給呼叫端確認寫到哪裡，組網址用不到。
     return json_({ ok: true, folder_id: folder.getId(), folder_name: folder.getName(), files: out });
   } catch (err) {
     return json_({ error: '未預期錯誤：' + (err && err.message ? err.message : String(err)) });
