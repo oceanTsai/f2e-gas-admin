@@ -1950,6 +1950,63 @@ console.log('\n[7] messageDispatch — 記憶決策卡片（出向）');
   `);
 }
 
+// 卡片的連結要真的可點。只印原子 id 等於要人自己去 grep 中文檔名——
+// 實戰第一張卡片就踩到了，所以這條要有測試守著。
+{
+  // NL 是各節自己宣告的區域變數（見 [0] / [2] 節），這一節也要一份
+  const NL = String.fromCharCode(10);
+  const sandbox = { PropertiesService: null, UrlFetchApp: null, console: console,
+                    _replyTarget_: () => null };
+  require('vm').createContext(sandbox);
+  require('vm').runInContext(
+    fs.readFileSync(path.join(ROOT, 'messageDispatch/providers/slack.js'), 'utf8') + NL +
+    'this.__slack = SlackProvider;', sandbox);
+
+  let posted = null;
+  const P = sandbox.__slack;
+  P.postMessage = function (ch, text, thread, blocks) { posted = { ch, text, blocks }; return { ts: '1' }; };
+
+  P.postMemoryDecision({ channel: 'C-MEM' }, {
+    memoryId: 'mem.20260824.031500',
+    repo: '104corp/104.vip.f2e.augma',
+    questions: [{
+      id: 'M-002', question: 'A 與 B 衝突',
+      atoms: ['vipadm.pitfall.script-setup-gap', 'vipadm.convention.eslint-and-coding'],
+      refs: [
+        { id: 'vipadm.pitfall.script-setup-gap', title: '規範說用 script setup',
+          path: 'docs/repo_knowledge/vipadm_2022/knowledge/平台共通/規範說用 script setup，但 137 個 .vue 只有 1 個是.md' },
+        { id: 'vipadm.convention.eslint-and-coding', title: 'ESLint、coding.md 約定',
+          path: 'docs/repo_knowledge/vipadm_2022/knowledge/平台共通/ESLint、coding.md 約定與 Commit／PR 規範.md' }
+      ],
+      options: ['A: 以前者為準', 'B: 以後者為準', 'C: 其實不衝突', 'D: 兩者都對']
+    }]
+  });
+
+  const blob = JSON.stringify(posted.blocks);
+  assert.ok(blob.indexOf('https://github.com/104corp/104.vip.f2e.augma/blob/main/') >= 0,
+    '必須給 GitHub 連結，不能只印 id');
+  assert.ok(blob.indexOf('%20') >= 0 || blob.indexOf('%E') >= 0,
+    '路徑含中文與空白，必須 encodeURI——不編碼 Slack 會把連結截在第一個空白處');
+  assert.ok(blob.indexOf('規範說用 script setup<') < 0, '連結文字要用 title');
+  ok('卡片給可點的 GitHub 連結，且路徑經過 encodeURI');
+
+  // 四個選項要各自對應一顆按鈕，而且送出的 choice 是**字母**
+  const actions = posted.blocks.filter(function (b) { return b.type === 'actions'; })[0];
+  assert.strictEqual(actions.elements.length, 4, '四個選項＝四顆按鈕');
+  const vals = actions.elements.map(function (e) { return JSON.parse(e.value).choice; });
+  assert.deepStrictEqual(vals, ['A', 'B', 'C', 'D'], '送字母，且與選項索引對稱');
+  ok('四個選項各一顆按鈕，choice 是 A/B/C/D（與 augma 的索引對稱）');
+
+  // 舊 payload（只有 atoms、沒有 refs）要退回印 id，不能爆掉
+  posted = null;
+  P.postMemoryDecision({ channel: 'C-MEM' }, {
+    memoryId: 'mem.20260824.031500', repo: '104corp/x',
+    questions: [{ id: 'M-001', question: 'x', atoms: ['a.b.c'], options: ['A: a', 'B: b'] }]
+  });
+  assert.ok(JSON.stringify(posted.blocks).indexOf('a.b.c') >= 0, '沒有 refs 時退回印 id');
+  ok('舊 payload（無 refs）退回印 id，不爆掉');
+}
+
 // 缺 MEMORY_CHANNEL 要單獨一個 env——它是「沒設定」而不是「設成空字串」。
 {
   const env = mkEnv({ NOTIFY_KEY: 'secret' });

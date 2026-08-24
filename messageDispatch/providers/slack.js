@@ -221,7 +221,27 @@ const SlackProvider = {
           elements: [{ type: 'mrkdwn', text: '\u2139\ufe0f ' + q.context }]
         });
       }
-      if (q.atoms && q.atoms.length) {
+      // 涉及哪幾顆原子。**一定要給可點的連結**——只印 id 等於要人自己去 grep
+      // 檔名，而檔名是中文帶括號的，grep 起來很痛苦。實戰第一張卡片就踩到了。
+      //
+      // refs 由 augma 的 kg.py audit 帶過來（{id, title, path}）。舊 payload 只有
+      // atoms（純 id 陣列），所以保留退路：有 refs 就給連結，沒有就印 id。
+      const refs = q.refs || [];
+      if (refs.length && ctx.repo) {
+        blocks.push({
+          type: 'context',
+          elements: [{
+            type: 'mrkdwn',
+            text: '\uD83D\uDD17 ' + refs.map(function (r) {
+              // 路徑含中文與空白，一定要 encodeURI——不編碼的話 Slack 會把連結
+              // 截在第一個空白處，點過去是 404。
+              const url = 'https://github.com/' + ctx.repo + '/blob/main/' +
+                          encodeURI(r.path || '');
+              return '<' + url + '|' + (r.title || r.id) + '>';
+            }).join('\u3000·\u3000')
+          }]
+        });
+      } else if (q.atoms && q.atoms.length) {
         blocks.push({
           type: 'context',
           elements: [{ type: 'mrkdwn', text: '\uD83D\uDD17 `' + q.atoms.join('`　`') + '`' }]
