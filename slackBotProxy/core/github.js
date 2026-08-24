@@ -10,6 +10,12 @@ const JIRA_KEY_PATTERN = /^[A-Z][A-Z0-9]+-[0-9]+$/;
 // <sanitized-slack-uid>-YYYYMMDD-HHMMSS。這條樣式在 ask-workflow.yml 的
 // Validate input 有一份**必須同步**的副本（那邊不能相信呼叫端送什麼）。
 const ASK_ID_PATTERN = /^[A-Za-z0-9]+-[0-9]{8}-[0-9]{6}$/;
+// 記憶決策的路由鍵。**用點分隔，刻意不與上面兩條 pattern 有交集**：
+// `MEM-20260824` 會被 decision.js 的 JIRA_IN_TEXT_RE 認成單號，
+// `mem-20260824-031500` 會被 ASK_ID_IN_TEXT_RE 認成 ask 提問編號。
+// 兩種誤認都會讓 thread 歸屬被快取六小時然後整串壞掉，而症狀離事發點很遠。
+// augma 側 memory-answer.yml 的 Validate input 有一份**必須同步**的副本。
+const MEMORY_ID_PATTERN = /^mem\.[0-9]{8}\.[0-9]{6}$/;
 
 function dispatchPipeline(pipelineType, jiraId, conversation) {
   const cleanJiraId = jiraId.trim().toUpperCase();
@@ -105,6 +111,40 @@ function dispatchAsk(prompt, userId, conversation, askId) {
   }
 
   return dispatchWorkflow({ event_type: 'ask', client_payload: clean });
+}
+
+// 記憶圖譜的裁決回傳。與 dispatchResume 完全分開，因為那條鏈以 jira_id +
+// pipeline + phase 為鍵，而記憶決策三個都沒有（詳見 core/memory.js 開頭）。
+//
+// conversation 必須在這裡就定案：結果是幾分鐘後由 augma 主動貼回來的，
+// 而它沒有 progress.json 可以反查錨點（那一份以 jira_key 為鍵、住在 feature
+// 分支上）。這一點與 dispatchAsk 完全同構。
+//
+// choice 是**選項字母**，不是選項全文。augma 的 memory-answer.yml 用
+// `^[A-Za-z]$` 擋掉全文——送全文在今天剛好也能work（選項字面以 "A: " 開頭），
+// 而那正是危險的地方：哪天選項文字改成不以字母開頭，那條路會靜默地對到錯的選項。
+function dispatchMemoryAnswer(memoryId, questionId, choice, user, conversation) {
+  const id = String(memoryId || '').trim();
+  if (!MEMORY_ID_PATTERN.test(id)) {
+    console.error('dispatchMemoryAnswer: memory_id 樣式不符：' + id);
+    return false;
+  }
+  const letter = String(choice || '').trim().toUpperCase();
+  if (!/^[A-Z]$/.test(letter)) {
+    console.error('dispatchMemoryAnswer: choice 必須是單一選項字母，收到：' + choice);
+    return false;
+  }
+
+  return dispatchWorkflow({
+    event_type: 'memory-answer',
+    client_payload: {
+      memory_id: id,
+      question_id: String(questionId || ''),
+      choice: letter,
+      user: String(user || 'unknown'),
+      conversation: conversation || {}
+    }
+  });
 }
 
 function dispatchWorkflow(payload) {

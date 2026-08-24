@@ -33,7 +33,8 @@ function doPost(e) {
     // 都接受：notify-question.sh 走 body，早期版本走 query string。
     const action = (e && e.parameter && e.parameter.action) || body.action;
     if (!action) {
-      return _json_({ error: 'Missing action（預期 decision / progress / answer_result / ask_result）' });
+      return _json_({ error: 'Missing action（預期 decision / progress / answer_result / ' +
+                              'ask_result / memory / memory_result）' });
     }
 
     const provider = getProvider();
@@ -53,6 +54,17 @@ function doPost(e) {
       // 自由提問的答案。與 pipeline 無關：ask 沒有下游、不碰任何 JIRA 單。
       case 'ask_result':
         return handleAskResult(body, key, provider);
+
+      // 記憶圖譜的待裁決問題（每日沉澱 job 發現的衝突）。
+      // 與 decision 的差別是它**沒有單號、也沒有 conversation 錨點**——
+      // cron 沒有任何人發過訊息，所以要貼到設定好的 MEMORY_CHANNEL。
+      // 詳見 core/memory.js 開頭。
+      case 'memory':
+        return handleMemoryRequest(body, key, provider);
+
+      // 裁決套用之後的結果。由 augma 發，因為只有它知道圖譜實際變成什麼樣。
+      case 'memory_result':
+        return handleMemoryResult(body, key, provider);
 
       default:
         return _json_({ error: 'Unknown action: ' + action });

@@ -148,6 +148,10 @@ const SlackProvider = {
       askKey: actionData.k || null,
       questionId: actionData.question_id,
       choice: actionData.choice,
+      // 記憶決策專用。choice 帶的是**選項字母**，所以卡片上「已定案」那行要
+      // 顯示的人話另外放在 label——只印一個 'B' 沒有人看得懂自己選了什麼。
+      memoryId: actionData.memory_id,
+      choiceLabel: actionData.label,
       jiraId: actionData.jira_id,
       pipeline: actionData.pipeline || 'sa-pipeline',
       user: userId ? this.mention(userId) : user,

@@ -108,7 +108,10 @@ console.log('[0] GAS 全域 scope — 專案內所有檔案能否共存');
     'intent_misses',      // 意圖規則未命中的語料
     'INTENT_CLASSIFIER',  // rules / llm（與 ANSWER_PARSER 分開，曝光面不同）
     'ASK_PASSPHRASE',     // 自由提問的通關密語；設成 off 才是關閉閘門
-    'ASK_OWNER'           // 被擋下時要找誰拿密語
+    'ASK_OWNER',          // 被擋下時要找誰拿密語
+    'MEMORY_CHANNEL'      // 記憶決策卡片要貼到哪個頻道——每日 cron 沒有
+                          // conversation 錨點（沒有任何人發過訊息），所以
+                          // 必須有一個設定好的固定頻道。見 messageDispatch/core/memory.js
   ];
   const badProps = [];
 
@@ -1870,5 +1873,180 @@ console.log('[6] messageDispatch — Phase 失敗必須看得出來');
   `);
 }
 
+
+// ══════════════════════════════════════════════════════════════════
+console.log('\n[7] messageDispatch — 記憶決策卡片（出向）');
+// 記憶決策沒有 jira_id、也**沒有 conversation 錨點**（每日 cron 沒有任何人
+// 發過訊息）。缺 MEMORY_CHANNEL 時必須明確報錯——靜默降級的症狀是
+// 「卡片永遠不出現」，而沒有人會想到是少設一個 Script Property。
+// ══════════════════════════════════════════════════════════════════
+{
+  const env = mkEnv({ NOTIFY_KEY: 'secret', MEMORY_CHANNEL: 'C-MEM' });
+  Object.assign(global, env.globals);
+  const calls = [];
+  const provider = {
+    name: 'slack',
+    postMemoryDecision: (conv, ctx) => {
+      calls.push({ kind: 'card', channel: conv.channel, memoryId: ctx.memoryId,
+                   n: ctx.questions.length });
+      return '1800.1';
+    },
+    postMessage: (ch, text, thread) => { calls.push({ kind: 'msg', ch, text, thread }); return {}; },
+  };
+  global.getProvider = () => provider;
+
+  eval(src(['messageDispatch/core/outbound.js',
+            'messageDispatch/core/memory.js',
+            'messageDispatch/MessageDispatch.gs.js']) + `
+  const Q = [{ id:'M-001', question:'A 與 B 標了衝突', context:'矛盾點',
+               atoms:['a.rule.x','b.rule.y'],
+               options:['A: 以《A》為準','B: 以《B》為準','C: 其實不衝突'] }];
+
+  // ① conversation 是空物件（augma 一律這樣送）→ 退回 MEMORY_CHANNEL
+  let res = doPost({ parameter:{ k:'secret' }, postData:{ contents: JSON.stringify({
+    action:'memory', memory_id:'mem.20260824.031500', conversation:{}, questions:Q })}});
+  assert.deepStrictEqual(calls[0], { kind:'card', channel:'C-MEM',
+                                     memoryId:'mem.20260824.031500', n:1 });
+  assert.ok(res._t.indexOf('"status":"ok"') >= 0);
+  ok('memory → 沒有錨點時貼到 MEMORY_CHANNEL');
+
+  // ② 缺 memory_id → 不貼卡片。發一張按了沒反應的卡片比不發更糟。
+  calls.length = 0;
+  res = doPost({ parameter:{ k:'secret' }, postData:{ contents: JSON.stringify({
+    action:'memory', conversation:{}, questions:Q })}});
+  assert.strictEqual(calls.length, 0);
+  assert.ok(res._t.indexOf('Missing memory_id') >= 0, res._t);
+  ok('缺 memory_id → 明確報錯且不貼卡片');
+
+  // ③ 錯的 NOTIFY_KEY → 擋下
+  calls.length = 0;
+  res = doPost({ parameter:{ k:'wrong' }, postData:{ contents: JSON.stringify({
+    action:'memory', memory_id:'mem.20260824.031500', conversation:{}, questions:Q })}});
+  assert.strictEqual(calls.length, 0);
+  assert.ok(res._t.indexOf('Unauthorized') >= 0);
+  ok('錯誤的 NOTIFY_KEY → 擋下且不貼任何東西');
+
+  // ④ memory_result 走 conversation 帶回來的錨點，不是預設頻道
+  calls.length = 0;
+  res = doPost({ parameter:{ k:'secret' }, postData:{ contents: JSON.stringify({
+    action:'memory_result', memory_id:'mem.20260824.031500', question_id:'M-001',
+    status:'ok', text:'✓ b.rule.y → deprecated',
+    conversation:{ channel:'C-MEM', thread:'1800.1' } })}});
+  assert.strictEqual(calls[0].kind, 'msg');
+  assert.strictEqual(calls[0].thread, '1800.1', '結果要掛在卡片底下，不是另開一則');
+  assert.ok(calls[0].text.indexOf('M-001') >= 0);
+  assert.ok(calls[0].text.indexOf('deprecated') >= 0, '原樣貼 kg.py 的輸出');
+  ok('memory_result → 掛在卡片的 thread 底下並原樣貼出圖譜改動');
+
+  // ⑤ 失敗也必須發訊息。人看到的最後一則是卡片上的「已定案」——
+  //    沉默的話他會以為裁決生效了。
+  calls.length = 0;
+  doPost({ parameter:{ k:'secret' }, postData:{ contents: JSON.stringify({
+    action:'memory_result', question_id:'M-001', status:'failed', text:'卡片已過期',
+    conversation:{ channel:'C-MEM', thread:'1800.1' } })}});
+  assert.strictEqual(calls.length, 1, '失敗不可以沉默');
+  assert.ok(calls[0].text.indexOf('沒有套用成功') >= 0, calls[0].text);
+  ok('memory_result 失敗 → 明講沒有套用成功（不沉默）');
+  `);
+}
+
+// 缺 MEMORY_CHANNEL 要單獨一個 env——它是「沒設定」而不是「設成空字串」。
+{
+  const env = mkEnv({ NOTIFY_KEY: 'secret' });
+  Object.assign(global, env.globals);
+  const calls = [];
+  global.getProvider = () => ({ name:'slack',
+    postMemoryDecision: () => { calls.push('card'); return '1'; },
+    postMessage: () => { calls.push('msg'); return {}; } });
+
+  eval(src(['messageDispatch/core/outbound.js',
+            'messageDispatch/core/memory.js',
+            'messageDispatch/MessageDispatch.gs.js']) + `
+  const res = doPost({ parameter:{ k:'secret' }, postData:{ contents: JSON.stringify({
+    action:'memory', memory_id:'mem.20260824.031500', conversation:{},
+    questions:[{ id:'M-001', question:'x', options:['A: a','B: b'] }] })}});
+  assert.strictEqual(calls.length, 0, '沒有頻道就不該貼任何東西');
+  assert.ok(res._t.indexOf('MEMORY_CHANNEL') >= 0, '錯誤訊息要指名要設哪個 key：' + res._t);
+  ok('缺 MEMORY_CHANNEL → 明確報錯並指名要設哪個 key（不靜默降級）');
+  `);
+}
+
+
+// ══════════════════════════════════════════════════════════════════
+console.log('\n[8] slackBotProxy — 記憶裁決按鈕（入向）');
+// 這一節守的是**分岔**：kind:'memory' 必須在所有決策邏輯之前被接走。
+// 流過去的話會拿 undefined 的 jiraId 去組去重鍵（`ans_undefined_M-001`，
+// 所有記憶題共用同一把鎖）、去讀 fetchProgress(undefined)、走 dispatchResume。
+// 症狀是「按了沒反應，而且 Actions 完全沒有紀錄」。
+// ══════════════════════════════════════════════════════════════════
+{
+  const env = mkEnv({ NOTIFY_KEY: 'secret', GITHUB_TOKEN: 'gh' });
+  Object.assign(global, env.globals);
+
+  const dispatched = [];
+  const resolved = [];
+  const transient = [];
+  let dispatchOk = true;
+
+  eval(src(INTENT_SRC.concat(['slackBotProxy/core/memory.js'])) + `
+  // 只替換掉真正打網路的那一支，dispatchMemoryAnswer 本體（含樣式驗證）要真的跑
+  dispatchWorkflow = function (payload) {
+    dispatched.push(payload);
+    return dispatchOk;
+  };
+  const provider = {
+    notifyTransient: (i, t) => transient.push(t),
+    resolveDecision: (conv, mid, info) => resolved.push(info),
+    parseInteraction: () => null,
+  };
+  const mk = (over) => Object.assign({
+    kind: 'memory', memoryId: 'mem.20260824.031500', questionId: 'M-001',
+    choice: 'B', choiceLabel: 'B: 以《B》為準', user: '<@U1>', userId: 'U1',
+    conversation: { provider:'slack', channel:'C-MEM', thread:'1800.1' },
+    messageId: '1800.1', blocks: [{ block_id:'decision_actions_M-001' }], responseUrl: null
+  }, over || {});
+
+  // ① 正常路徑：dispatch 的是 memory-answer，不是 resume
+  let res = handleMemoryInteraction(mk(), provider);
+  assert.strictEqual(dispatched.length, 1);
+  assert.strictEqual(dispatched[0].event_type, 'memory-answer');
+  assert.strictEqual(dispatched[0].client_payload.memory_id, 'mem.20260824.031500');
+  assert.strictEqual(dispatched[0].client_payload.choice, 'B', '送字母，不送選項全文');
+  assert.strictEqual(dispatched[0].client_payload.conversation.thread, '1800.1',
+    'augma 沒有 progress.json 可以反查錨點，錨點必須隨答案一起送');
+  assert.strictEqual(resolved[0].choice, 'B: 以《B》為準',
+    '卡片上要顯示人話，不是一個字母');
+  assert.strictEqual(res._t, '', '互動回應必須是空 body，否則 Slack 會用它替換整張卡片');
+  ok('memory 按鈕 → dispatch memory-answer（帶錨點、送字母、卡片顯示人話）');
+
+  // ② 連點：第二次不再 dispatch
+  handleMemoryInteraction(mk(), provider);
+  assert.strictEqual(dispatched.length, 1, '連點不可以重複 dispatch');
+  assert.ok(transient.join('|').indexOf('本次點擊不生效') >= 0, transient.join('|'));
+  ok('連點 → 去重，且告訴點擊者是誰先答的');
+
+  // ③ 樣式陷阱：JIRA 形狀與 ask 形狀的 id 都必須被擋掉。
+  //    這兩種在通訊層會被 thread 反查誤認（然後快取六小時），所以連 dispatch
+  //    都不該送出去。
+  dispatched.length = 0; transient.length = 0;
+  handleMemoryInteraction(mk({ memoryId: 'MEM-20260824' }), provider);
+  handleMemoryInteraction(mk({ memoryId: 'mem-20260824-031500' }), provider);
+  assert.strictEqual(dispatched.length, 0,
+    'JIRA 形狀與 ask 形狀的 memory_id 都必須被擋掉');
+  assert.strictEqual(transient.length, 2);
+  ok('memory_id 樣式不符（JIRA 形狀／ask 形狀）→ 擋下且不 dispatch');
+
+  // ④ dispatch 失敗時**不可**把卡片標成已定案，而且要撤掉去重讓他能重試
+  dispatched.length = 0; transient.length = 0; resolved.length = 0;
+  dispatchOk = false;
+  handleMemoryInteraction(mk({ questionId: 'M-002' }), provider);
+  assert.strictEqual(resolved.length, 0, 'dispatch 失敗不可以標成已定案');
+  assert.ok(transient.join('|').indexOf('沒有套用') >= 0, transient.join('|'));
+  dispatchOk = true;
+  handleMemoryInteraction(mk({ questionId: 'M-002' }), provider);
+  assert.strictEqual(dispatched.length, 2, '失敗後要能再點一次（去重標記已撤掉）');
+  ok('dispatch 失敗 → 不標定案、撤去重、可重試');
+  `);
+}
 
 console.log('\n✅ ' + passed + ' 項全部通過\n');

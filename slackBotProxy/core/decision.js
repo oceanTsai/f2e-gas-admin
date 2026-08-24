@@ -409,6 +409,16 @@ function handleInteraction(payload, provider, key) {
     return _handleAskConfirm_(interaction, provider);
   }
 
+  // 記憶圖譜的裁決按鈕——同理，也必須在所有決策邏輯之前分岔。
+  // 下面整段都假設「這是 pipeline 的決策」：去重鍵是 `ans_<jiraId>_<qid>`
+  // （記憶決策沒有 jiraId，會組出 `ans_undefined_M-001` 讓所有記憶題共用同一把鎖）、
+  // 讀 fetchProgress(jiraId)（拿 undefined 去打 GitHub contents API 然後 404）、
+  // dispatchResume 以 jira_id + pipeline + phase 為鍵（augma 那側直接失敗）。
+  // 詳見 core/memory.js 開頭。
+  if (interaction.kind === 'memory') {
+    return handleMemoryInteraction(interaction, provider);
+  }
+
   const questionId = interaction.questionId;
   const choice = interaction.choice;
   const jiraId = interaction.jiraId;

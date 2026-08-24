@@ -10,6 +10,8 @@
 //  實作時的對應關係（介面與 SlackProvider 相同）：
 //    postAccepted    → spaces.messages.create（取得 thread.name 當錨點）
 //    postDecision    → Cards v2 的 buttonList；button 帶 question_id / choice / jira_id / pipeline
+//    postMemoryDecision → 同上，但 button 帶 kind:'memory' / memory_id / question_id /
+//                      choice（**字母**，不是選項全文）/ label，且不放文字回覆提示
 //    resolveDecision → spaces.messages.patch，把 buttonList 換成純文字（等同消除按鈕）
 //    parseInteraction→ CARD_CLICKED 事件；GAS 對 Google Chat 有原生 onMessage /
 //                      onCardClick 觸發，不走 doPost，因此入口層要另外接（見規劃文件第十二章第 4 節）
@@ -34,6 +36,7 @@ const GoogleChatProvider = {
   implemented: false,
   updateProgress:   function() { _googleChatNotImplemented_('updateProgress'); },
   postDecision:     function() { _googleChatNotImplemented_('postDecision'); },
+  postMemoryDecision: function() { _googleChatNotImplemented_('postMemoryDecision'); },
   uploadFiles:      function() { _googleChatNotImplemented_('uploadFiles'); },
   postMessage:      function() { _googleChatNotImplemented_('postMessage'); },
   updateMessage:    function() { _googleChatNotImplemented_('updateMessage'); },

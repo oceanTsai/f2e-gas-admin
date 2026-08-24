@@ -170,6 +170,105 @@ const SlackProvider = {
     return messageId;
   },
 
+  // 2b. 記憶圖譜的決策卡片
+  //     ctx = { memoryId, questions: [...], repo, runUrl }
+  //
+  //     與 postDecision 的差別只有三處，但每一處都不能省：
+  //       · 沒有 jiraId／phase／pipeline（記憶決策不綁單號）
+  //       · 按鈕 value 帶 kind:'memory'——入向靠它分岔到 handleMemoryInteraction；
+  //         少了它會落到決策路徑，然後拿 undefined 的 jiraId 去組快取鍵、
+  //         靜默地什麼都不做
+  //       · **不放「文字回覆」的提示**：記憶決策只能按按鈕（理由見
+  //         core/memory.js 開頭）。留著那句提示的話，人照著打 `@Alice answer`
+  //         會走進 handleTextAnswer，然後被反查不到單號而擋下——他會以為壞了
+  //
+  //     block_id 沿用 `decision_actions_<qid>` / `decision_progress`：
+  //     入向的 resolveDecision 就地更新靠這兩個名字，改名等於按鈕永遠不消失。
+  postMemoryDecision: function (conv, ctx) {
+    const channel = conv.channel;
+    const threadTs = conv.thread || null;
+    const questions = ctx.questions || [];
+
+    const blocks = [
+      {
+        type: 'header',
+        text: { type: 'plain_text', text: '\u{1F9E0} 記憶圖譜待裁決', emoji: true }
+      },
+      {
+        type: 'section',
+        block_id: 'decision_progress',
+        text: {
+          type: 'mrkdwn',
+          text: '共 *' + questions.length + '* 題。這些是**兩顆記憶原子互相矛盾、' +
+                '但沒有人裁決過**的情況——沒裁決的話兩顆都會在檢索裡浮上來，' +
+                '下游拿到的是兩個互斥的「結論」，引用哪一顆變成隨機。'
+        }
+      },
+      { type: 'divider' }
+    ];
+
+    questions.forEach(function (q, qi) {
+      const qid = q.id || ('M-' + (qi + 1));
+      const options = (q.options && q.options.length) ? q.options : ['A: 同意', 'B: 不同意'];
+
+      blocks.push({
+        type: 'section',
+        text: { type: 'mrkdwn', text: '*' + qid + '*　' + (q.question || '（缺少問題描述）') }
+      });
+      if (q.context) {
+        blocks.push({
+          type: 'context',
+          elements: [{ type: 'mrkdwn', text: '\u2139\ufe0f ' + q.context }]
+        });
+      }
+      if (q.atoms && q.atoms.length) {
+        blocks.push({
+          type: 'context',
+          elements: [{ type: 'mrkdwn', text: '\uD83D\uDD17 `' + q.atoms.join('`　`') + '`' }]
+        });
+      }
+
+      blocks.push({
+        type: 'actions',
+        block_id: 'decision_actions_' + qid,
+        elements: options.map(function (opt, oi) {
+          return {
+            type: 'button',
+            text: {
+              type: 'plain_text',
+              text: opt.length > 70 ? (opt.substring(0, 67) + '...') : opt,
+              emoji: true
+            },
+            action_id: 'memory_' + qid + '_' + oi,
+            value: JSON.stringify({
+              kind: 'memory',
+              memory_id: ctx.memoryId,
+              question_id: qid,
+              // ⚠️ 送**字母**，不送選項全文。字母由索引推出，與 augma 的
+              //    `ord(letter) - ord('A')` 對稱。送全文在今天剛好也能work
+              //    （選項字面以 "A: " 開頭），而那正是危險的地方：哪天選項文字
+              //    改成不以字母開頭，那條路會靜默地開始對到錯的選項。
+              //    augma 的 memory-answer.yml 用 `^[A-Za-z]$` 擋掉全文。
+              choice: String.fromCharCode(65 + oi),
+              // 卡片上「已定案」那行要顯示人看得懂的東西，不是一個字母。
+              label: opt.length > 80 ? (opt.substring(0, 77) + '...') : opt
+            })
+          };
+        })
+      });
+
+      if (qi < questions.length - 1) blocks.push({ type: 'divider' });
+    });
+
+    const foot = ['\u{1F4CC} 這張卡片**只能按按鈕**（選項是列舉的，所以不開文字通道）。'];
+    if (ctx.runUrl) foot.push('<' + ctx.runUrl + '|每日沉澱的執行紀錄>');
+    blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: foot.join('　·　') }] });
+
+    const summary = '\u{1F9E0} 記憶圖譜有 ' + questions.length + ' 題待裁決';
+    const res = this.postMessage(channel, summary, threadTs, blocks);
+    return res ? res.ts : null;
+  },
+
   // 附件上傳：Slack 的 files.upload 已退役，須走 external upload 三步
   // 需要 Bot Token Scope: files:write
   uploadFiles: function (conv, attachments) {
