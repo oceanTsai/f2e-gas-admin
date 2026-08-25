@@ -191,6 +191,10 @@ function _routeMentionEvent_(event, provider) {
       _triggerPipelineTask_('sa-pipeline', args, conv, event.user, provider);
       break;
 
+    case 'light-ra':
+      _triggerPipelineTask_('light-ra', args, conv, event.user, provider);
+      break;
+
     // 以文字回覆待決問題（按鈕只能傳回預設選項，表達不了「要改成什麼」）
     case 'answer':
     case 'ans':
@@ -226,7 +230,13 @@ function _routeMentionEvent_(event, provider) {
 
 function _triggerPipelineTask_(pipelineType, jiraId, conv, user, provider) {
   if (!jiraId) {
-    provider.postMessage(conv.channel, `${provider.mention(user)} ⚠️ 請提供 Jira ID（例：\`@Alice ${pipelineType === 'ra-pipeline' ? 'ra' : 'sa'} VIPOP-12345\`）`, _replyTarget_(conv));
+    const hintMap = {
+      'ra-pipeline': 'ra',
+      'sa-pipeline': 'sa',
+      'light-ra': 'light-ra'
+    };
+    const hint = hintMap[pipelineType] || 'ra';
+    provider.postMessage(conv.channel, `${provider.mention(user)} ⚠️ 請提供 Jira ID（例：\`@Alice ${hint} VIPOP-12345\`）`, _replyTarget_(conv));
     return;
   }
 
