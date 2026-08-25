@@ -108,6 +108,40 @@ function diagnoseSlackAccess() {
 }
 
 
+/**
+ * 清掉某一題的「已回答」去重鎖（在 GAS 編輯器裡填好參數執行）。
+ *
+ * 用在：dispatch 已經觸發成功（cache 寫了鎖），但下游 resume workflow /
+ * apply-answer.sh 沒能把 answered 寫回 progress.json（push 衝突、phase-guard
+ * 擋下、job 失敗或被 concurrency 砍掉）——progress.json 誠實地還是
+ * answered:false，決策卡片也還顯示待決議，但 _alreadyAnswered_ 只認 cache，
+ * 使用者會被「已由 X 回答，本次回覆不生效」擋住，卡到 6 小時 TTL 自然過期。
+ *
+ * ⚠️ 這支只清 GAS 這邊的鎖，不動 progress.json、不重觸發任何流程。清完之後
+ *    使用者要在原本的 thread 裡重新回覆一次，答案才會真的送出去。
+ *    若下游那次其實成功了（只是還沒 push/還沒被卡片看到），清了鎖也不會
+ *    造成重複套用——augma 的 update-progress.sh 一樣會擋掉已經 answered 的題。
+ */
+function clearAnswerLock(jiraId, questionId) {
+  const jira = String(jiraId || '').trim().toUpperCase();
+  const qid = _normalizeQid_(questionId);
+  if (!jira || !qid) {
+    console.log('參數不對：jiraId="' + jiraId + '" questionId="' + questionId + '"（題號要能被 _normalizeQid_ 認出，例如 Q-901）');
+    return;
+  }
+
+  const key = _answerKey_(jira, qid);
+  const cache = CacheService.getScriptCache();
+  const before = cache.get(key);
+  if (!before) {
+    console.log('沒有找到 ' + key + ' 這把鎖，可能已經過期或本來就沒鎖。');
+    return;
+  }
+  cache.remove(key);
+  console.log('已清掉 ' + key + '（原本記的是「已由 ' + before + ' 回答」）。回原本的 thread 重新回覆一次即可。');
+}
+
+
 /** 清掉 thread → 歸屬 的反查快取（scope 修好後用，免得等 6 小時）。 */
 function clearRouteCache() {
   // CacheService 沒有「列出所有 key」的 API，所以只能清掉有紀錄的那一筆。
