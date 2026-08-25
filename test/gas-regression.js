@@ -1396,6 +1396,46 @@ console.log('\n[3e-3] github.js — dispatchAsk 的 ask_id 契約');
   assert.ok(Object.keys(sent[0].client_payload).length <= 10,
     'client_payload top-level 屬性上限 10 個，實際 ' + Object.keys(sent[0].client_payload).length);
   ok('client_payload 屬性數仍在 GitHub 的 10 個上限內');
+
+  // ── dispatchPipeline 的 user_id（RA/SA 的觸發者稽核）────────────────
+  // augma 那側寫進 progress.json.requester。在這條線接上之前，「誰叫的」
+  // 完全查不到：commit author 一律是 augma-bot、conversation 只有
+  // channel/thread，而 dispatchPipeline 根本沒送這個欄位。
+  sent.length = 0;
+  dispatchPipeline('ra-pipeline', 'vipop-46703', CONV, 'U0BP6PJQGKB');
+  assert.strictEqual(sent[0].client_payload.user_id, 'U0BP6PJQGKB');
+  assert.strictEqual(sent[0].client_payload.jira_id, 'VIPOP-46703', 'jira_id 仍要正規化成大寫');
+  assert.strictEqual(sent[0].event_type, 'ra-pipeline');
+  ok('dispatchPipeline 帶上觸發者 user_id');
+
+  // 手動 workflow_dispatch 沒有觸發者。刻意**不放欄位**而不是放 'unknown'：
+  // progress.json 的 requester 留空代表「本來就沒有觸發者」，填 'unknown'
+  // 看起來像有值卻查不到人——那比沒有更糟。
+  sent.length = 0;
+  dispatchPipeline('sa-pipeline', 'VIPOP-46703', CONV);
+  assert.ok(!('user_id' in sent[0].client_payload), '沒有觸發者就不該有 user_id 欄位');
+  sent.length = 0;
+  dispatchPipeline('sa-pipeline', 'VIPOP-46703', CONV, '');
+  assert.ok(!('user_id' in sent[0].client_payload), '空字串同理');
+  ok('無觸發者 → 不放 user_id 欄位（不是放 unknown）');
+
+  // 清洗而非拒絕：Slack 的 event.user 本來就是 raw UID，但萬一上游改送
+  // mention 格式（<@U1>），清掉包裝仍能得到正確的 id。augma 那側還有一道
+  // ^[A-Za-z0-9][A-Za-z0-9-]*$ 白名單，清洗後仍不合的會被那裡擋掉並警告。
+  sent.length = 0;
+  dispatchPipeline('ra-pipeline', 'VIPOP-46703', CONV, '<@U0BP6PJQGKB>');
+  assert.strictEqual(sent[0].client_payload.user_id, 'U0BP6PJQGKB', 'mention 包裝要被清掉');
+  sent.length = 0;
+  dispatchPipeline('ra-pipeline', 'VIPOP-46703', CONV, '"; rm -rf /');
+  assert.ok(!/[^A-Za-z0-9]/.test(sent[0].client_payload.user_id || ''),
+    'user_id 只能剩英數：' + sent[0].client_payload.user_id);
+  ok('user_id 一律清洗成英數（它會進 progress.json 與稽核輸出）');
+
+  sent.length = 0;
+  dispatchPipeline('ra-pipeline', 'VIPOP-46703', CONV, 'U0BP6PJQGKB');
+  assert.ok(Object.keys(sent[0].client_payload).length <= 10,
+    'client_payload top-level 屬性上限 10 個，實際 ' + Object.keys(sent[0].client_payload).length);
+  ok('pipeline 的 client_payload 屬性數仍在上限內');
   `);
 }
 

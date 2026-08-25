@@ -253,7 +253,7 @@ function _triggerPipelineTask_(pipelineType, jiraId, conv, user, provider) {
   const anchoredConv = provider.postAccepted(conv, acceptMsg);
 
   // 2. 觸發 GitHub Actions Pipeline
-  const ok = dispatchPipeline(pipelineType, cleanJiraId, anchoredConv);
+  const ok = dispatchPipeline(pipelineType, cleanJiraId, anchoredConv, user);
 
   if (ok) {
     // 刻意不再發第二則訊息：上面那則「任務受理」會被 notify-progress 持續更新成

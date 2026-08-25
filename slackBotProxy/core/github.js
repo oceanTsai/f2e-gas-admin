@@ -17,18 +17,28 @@ const ASK_ID_PATTERN = /^[A-Za-z0-9]+-[0-9]{8}-[0-9]{6}$/;
 // augma 側 memory-answer.yml 的 Validate input 有一份**必須同步**的副本。
 const MEMORY_ID_PATTERN = /^mem\.[0-9]{8}\.[0-9]{6}$/;
 
-function dispatchPipeline(pipelineType, jiraId, conversation) {
+function dispatchPipeline(pipelineType, jiraId, conversation, userId) {
   const cleanJiraId = jiraId.trim().toUpperCase();
 
-  const payload = {
-    event_type: pipelineType,
-    client_payload: {
-      jira_id: cleanJiraId,
-      conversation: conversation
-    }
+  const clean = {
+    jira_id: cleanJiraId,
+    conversation: conversation
   };
 
-  return dispatchWorkflow(payload);
+  // 觸發者的 Slack UID。augma 那側寫進 progress.json 的 requester 欄位——
+  // 那是唯一進版控的觸發紀錄（commit author 一律是 augma-bot、conversation
+  // 只有 channel/thread，兩者都還不出「誰叫的」）。
+  //
+  // 送 raw id 而不是顯示名，理由與 dispatchAsk 相同：顯示名可能含點或中文，
+  // 而 augma 那側以 ^[A-Za-z0-9][A-Za-z0-9-]*$ 白名單擋外部輸入。
+  // 差別是這裡**沒有** 'unknown' fallback——progress.json 的 requester 留空
+  // 代表「手動觸發，本來就沒有觸發者」，填 'unknown' 反而看起來像有值卻查不到人。
+  const uid = String(userId || '').replace(/[^A-Za-z0-9]/g, '');
+  if (uid) {
+    clean.user_id = uid;
+  }
+
+  return dispatchWorkflow({ event_type: pipelineType, client_payload: clean });
 }
 
 function dispatchResume(jiraId, pipeline, questionId, choice, user) {
