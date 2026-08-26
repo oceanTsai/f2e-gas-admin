@@ -125,6 +125,10 @@ function _routeSlashCommand_(e, provider) {
       );
       return ContentService.createTextOutput('🧪 test 已送出');
 
+    case '/light-ra':
+      _triggerPipelineTask_('light-ra', text, conv, user, provider);
+      return ContentService.createTextOutput('🚀 收到，Light-RA 輕量審查任務派發中…');
+
     case '/ra':
       _triggerPipelineTask_('ra-pipeline', text, conv, user, provider);
       return ContentService.createTextOutput('🚀 收到，RA 需求分析任務派發中…');
