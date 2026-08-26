@@ -34,7 +34,7 @@ function doPost(e) {
     const action = (e && e.parameter && e.parameter.action) || body.action;
     if (!action) {
       return _json_({ error: 'Missing action（預期 decision / progress / answer_result / ' +
-                              'ask_result / memory / memory_result）' });
+                              'ask_result / light_ra_result / memory / memory_result）' });
     }
 
     const provider = getProvider();
@@ -54,6 +54,11 @@ function doPost(e) {
       // 自由提問的答案。與 pipeline 無關：ask 沒有下游、不碰任何 JIRA 單。
       case 'ask_result':
         return handleAskResult(body, key, provider);
+
+      // light-ra 完成（或停在 awaiting_decision）時把 light-spec 全文推回 Slack。
+      // 與 ask_result 的差別：開頭 @ 觸發者、md 轉 Slack mrkdwn、帶待答題數。
+      case 'light_ra_result':
+        return handleLightRaResult(body, key, provider);
 
       // 記憶圖譜的待裁決問題（每日沉澱 job 發現的衝突）。
       // 與 decision 的差別是它**沒有單號、也沒有 conversation 錨點**——

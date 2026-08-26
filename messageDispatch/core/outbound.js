@@ -173,6 +173,85 @@ function handleAnswerResult(body, key, provider) {
 //     又燒一次 runner。所以 agent 掛掉、逾時、沒寫出檔案，這裡都要講出來。
 // ═══════════════════════════════════════════════════════════════════
 
+function _mdToSlack_(md) {
+  // 最小化的 Markdown → Slack mrkdwn。只處理 light-spec 模板實際用到的語法，
+  // 不做完整 Markdown parser（沒必要，也容易出錯）。
+  return String(md || '')
+    .split('\n')
+    .map(function (line) {
+      var h = line.match(/^#{1,6}\s+(.*)$/);          // ## 標題 → *粗體*
+      if (h) return '*' + h[1].trim() + '*';
+      line = line.replace(/^(\s*)-\s+\[[ xX]\]\s+/, '$1\u2022 ');  // - [ ] → •
+      line = line.replace(/^(\s*)[-*]\s+/, '$1\u2022 ');            // - / * → •
+      return line;
+    })
+    .join('\n');
+}
+
+// light-ra 的 light-spec 全文（由 augma 的 notify-light-ra-result.sh 呼叫）。
+// 與 handleAskResult 的差別：開頭 @ 觸發者（body.requester = Slack UID，組 <@Uxxx>）、
+// md 轉 Slack mrkdwn、帶待答題數與續跑標記。provider 沒有 mention 方法，語法手組。
+// ❗ 對「沒有內容」也要發訊息——呼叫端是 if: always()。
+function handleLightRaResult(body, key, provider) {
+  const notifyKey = PropertiesService.getScriptProperties().getProperty('NOTIFY_KEY');
+  if (notifyKey && key !== notifyKey) {
+    return ContentService.createTextOutput(JSON.stringify({ error: 'Unauthorized: invalid notify key' }))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+
+  const conv = body.conversation || {};
+  if (!conv.channel && !conv.space) {
+    return ContentService.createTextOutput(JSON.stringify({ error: 'Missing channel or space in conversation' }))
+      .setMimeType(ContentService.MimeType.JSON);
+  }
+
+  const jiraId = body.jira_id || '';
+  const spec = String(body.spec || '').trim();
+  const pending = body.pending_count || 0;
+  const isResume = !!body.is_resume;
+
+  const lines = [];
+
+  // 開頭 @ 觸發者（問題 3）。requester 是 Slack UID（例如 U0123ABCD），
+  // 組 <@Uxxx> 才會真的 tag 人；沒有就不加前綴。
+  const mention = body.requester ? ('<@' + body.requester + '> ') : '';
+  const titleTail = isResume ? '（已依你的回覆更新）' : '';
+
+  if (spec) {
+    lines.push(mention + '✅ *' + jiraId + '* 輕量審查完成' + titleTail);
+    if (pending > 0) {
+      lines.push('🔴 其中 *' + pending + '* 題需你確認，請看本 thread 內的問題卡片並回答。');
+    } else {
+      lines.push('✅ 無待確認事項，規格已足夠 SA 接手。');
+    }
+    lines.push('');
+    lines.push(_mdToSlack_(spec));
+    if (body.truncated) {
+      lines.push('');
+      lines.push('_（內容過長已截斷。完整版在分支 `feature/' + jiraId +
+                 '` 的 `workspace/ra_outputs/RA-' + jiraId + '-light-spec.md`。）_');
+    }
+  } else {
+    const failed = (body.status === 'failed') || !!body.error;
+    lines.push(mention + (failed
+      ? '⚠️ ' + jiraId + ' 輕量審查過程中出錯，沒有產出內容。'
+      : '⚠️ ' + jiraId + ' 輕量審查未產出內容（可能逾時）。'));
+    if (body.error) {
+      lines.push('```' + String(body.error).slice(0, 300) + '```');
+    }
+  }
+
+  if (body.run_url) {
+    lines.push('');
+    lines.push('<' + body.run_url + '|執行記錄>');
+  }
+
+  provider.postMessage(conv.channel, lines.join('\n'), conv.thread || conv.thread_ts || null);
+
+  return ContentService.createTextOutput(JSON.stringify({ status: 'ok' }))
+    .setMimeType(ContentService.MimeType.JSON);
+}
+
 function handleAskResult(body, key, provider) {
   const notifyKey = PropertiesService.getScriptProperties().getProperty('NOTIFY_KEY');
   if (notifyKey && key !== notifyKey) {
