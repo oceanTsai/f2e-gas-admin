@@ -34,6 +34,7 @@ function _googleChatNotImplemented_(method) {
 const GoogleChatProvider = {
   name: 'googlechat',
   implemented: false,
+  mention:          function() { _googleChatNotImplemented_('mention'); },
   updateProgress:   function() { _googleChatNotImplemented_('updateProgress'); },
   postDecision:     function() { _googleChatNotImplemented_('postDecision'); },
   postMemoryDecision: function() { _googleChatNotImplemented_('postMemoryDecision'); },

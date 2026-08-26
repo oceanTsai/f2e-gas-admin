@@ -45,6 +45,7 @@ const GoogleChatProvider = {
   postAccepted:     function() { _googleChatNotImplemented_('postAccepted'); },
   postIntentHelp:   function() { _googleChatNotImplemented_('postIntentHelp'); },
   resolveDecision:  function() { _googleChatNotImplemented_('resolveDecision'); },
+  parseFiles:       function() { _googleChatNotImplemented_('parseFiles'); },
   parseInteraction: function() { _googleChatNotImplemented_('parseInteraction'); },
   notifyTransient:  function() { _googleChatNotImplemented_('notifyTransient'); },
   postMessage:      function() { _googleChatNotImplemented_('postMessage'); },

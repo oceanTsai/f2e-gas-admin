@@ -56,7 +56,8 @@ function doPost(e) {
         return handleAskResult(body, key, provider);
 
       // light-ra 完成（或停在 awaiting_decision）時把 light-spec 全文推回 Slack。
-      // 與 ask_result 的差別：開頭 @ 觸發者、md 轉 Slack mrkdwn、帶待答題數。
+      // 與 ask_result 的差別：開頭 @ 觸發者、md 轉 Slack mrkdwn、帶待答題數，
+      // 而且它是硬截斷（不分段）——被截掉的全文靠附件補。
       case 'light_ra_result':
         return handleLightRaResult(body, key, provider);
 

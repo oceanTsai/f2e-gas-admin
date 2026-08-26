@@ -13,6 +13,55 @@
 // ═══════════════════════════════════════════════════════════════════
 
 // ═══════════════════════════════════════════════════════════════════
+//  附件：所有出向通道共用的一段
+//
+//  為什麼要抽出來：附件上傳的能力一直都在（SlackProvider.uploadFiles），但只接
+//  在決策卡片那一條線上。ask 的答案、RA 的完成通知、light-ra 的 light-spec
+//  一個都附不了——而那些正是「內容太長塞不進訊息」最常發生的地方。
+//
+//  augma 那側已經統一：任何 Phase 把檔案寫進 workspace/outbox/，收尾的
+//  notify-*.sh 就會把它放進 payload 的 attachments。這裡負責把它們貼上去。
+//
+//  ⚠️ 附件失敗**不影響回應**。訊息本文已經送出去了，為了附件回 error 的話，
+//     augma 那側會判定整則通知失敗（它只看 body 裡有沒有 error），
+//     然後在 Actions log 留下一則誤導的錯誤。改為在 thread 裡補一句說明。
+//
+//  anchorTs：附件要掛在哪一則底下。傳 null 就掛在 conv.thread。
+// ═══════════════════════════════════════════════════════════════════
+
+function _postAttachments_(provider, conv, attachments, anchorTs) {
+  const list = attachments || [];
+  if (!list.length) return null;
+
+  const target = {
+    channel: conv.channel,
+    thread: anchorTs || conv.thread || conv.thread_ts || null
+  };
+
+  let res;
+  try {
+    res = provider.uploadFiles(target, list);
+  } catch (err) {
+    // GoogleChatProvider 的 uploadFiles 是會 throw 的 stub。切過去時附件不該
+    // 讓整條通知掛掉——但也不能靜默，否則沒有人會知道附件從此不見了。
+    console.error('附件上傳異常（provider 不支援？）:', err);
+    return null;
+  }
+
+  if (res && res.failed) {
+    // 人手上沒有這些檔案，而訊息本文可能正在說「詳見附件」。一定要講。
+    provider.postMessage(target.channel,
+      '⚠️ 有 ' + res.failed + ' 個附件沒有上傳成功：`' +
+      (res.failedNames || []).join('`、`') + '`' + '\u000a' +
+      '_（常見原因：Bot 缺少 `files:write` 權限，或檔案超過大小上限。' +
+      '內容仍在對應的 git 分支上。）_',
+      target.thread);
+  }
+  return res;
+}
+
+
+// ═══════════════════════════════════════════════════════════════════
 //  決策核心處理模組 (Decision Core)
 //  負責決策請求驗證、卡片發布、LockService 防連點去重與 Pipeline 恢復
 // ═══════════════════════════════════════════════════════════════════
@@ -46,9 +95,12 @@ function handleDecisionRequest(body, key, provider) {
     questions: questions,
     jiraId: jiraId,
     phase: phase,
-    pipeline: pipeline,
-    attachments: attachments
+    pipeline: pipeline
   });
+
+  // 附件（補問清單 / 阻塞總覽）掛在卡片底下。走與其他通道相同的那一段，
+  // 所以上傳失敗時人會在同一個 thread 收到說明，而不是只留在 GAS 的 log 裡。
+  _postAttachments_(provider, conv, attachments, messageId);
 
   return ContentService.createTextOutput(JSON.stringify({
     status: 'ok',
@@ -158,7 +210,11 @@ function handleAnswerResult(body, key, provider) {
     lines.push('_卡片上這幾題的按鈕可以忽略，點了會被擋下。_');
   }
 
-  provider.postMessage(conv.channel, lines.join('\u000a'), conv.thread || conv.thread_ts || null);
+  const posted = provider.postMessage(conv.channel, lines.join('\u000a'), conv.thread || conv.thread_ts || null);
+
+  // 附件（例如更新後的補問清單）。掛在剛貼出的那則底下，讓「說明 → 檔案」相鄰。
+  _postAttachments_(provider, conv, body.attachments,
+                    (posted && posted.ts) || null);
 
   return ContentService.createTextOutput(JSON.stringify({ status: 'ok' }))
     .setMimeType(ContentService.MimeType.JSON);
@@ -189,9 +245,14 @@ function _mdToSlack_(md) {
 }
 
 // light-ra 的 light-spec 全文（由 augma 的 notify-light-ra-result.sh 呼叫）。
-// 與 handleAskResult 的差別：開頭 @ 觸發者（body.requester = Slack UID，組 <@Uxxx>）、
-// md 轉 Slack mrkdwn、帶待答題數與續跑標記。provider 沒有 mention 方法，語法手組。
+// 與 handleAskResult 的差別：開頭 @ 觸發者（body.requester = Slack UID）、
+// md 轉 Slack mrkdwn、帶待答題數與續跑標記。
 // ❗ 對「沒有內容」也要發訊息——呼叫端是 if: always()。
+//
+// 附件：這條路是**硬截斷**（notify-light-ra-result.sh 不分段），所以 truncated
+// 時 augma 一定會把全文當附件一起送來。訊息因此指向附件而不是指向 git 分支——
+// PO 不會為了看被截掉的那半去翻 git。附件上傳失敗時 _postAttachments_ 會在
+// 同一個 thread 補一則說明，所以「指向附件但附件不在」不會變成無聲的謊。
 function handleLightRaResult(body, key, provider) {
   const notifyKey = PropertiesService.getScriptProperties().getProperty('NOTIFY_KEY');
   if (notifyKey && key !== notifyKey) {
@@ -212,9 +273,11 @@ function handleLightRaResult(body, key, provider) {
 
   const lines = [];
 
-  // 開頭 @ 觸發者（問題 3）。requester 是 Slack UID（例如 U0123ABCD），
-  // 組 <@Uxxx> 才會真的 tag 人；沒有就不加前綴。
-  const mention = body.requester ? ('<@' + body.requester + '> ') : '';
+  // 開頭 @ 觸發者。requester 是 Slack UID（例如 U0123ABCD）。
+  // 走 provider.mention 而不是手組 `<@…>`：Google Chat 是 `<users/…>`，
+  // 寫死的那一種在另一個平台會渲染成一段沒人看得懂的純文字。
+  // （這一輪替 messageDispatch 的 SlackProvider 補上了這個方法，入向那份本來就有。）
+  const mention = body.requester ? (provider.mention(body.requester) + ' ') : '';
   const titleTail = isResume ? '（已依你的回覆更新）' : '';
 
   if (spec) {
@@ -228,8 +291,7 @@ function handleLightRaResult(body, key, provider) {
     lines.push(_mdToSlack_(spec));
     if (body.truncated) {
       lines.push('');
-      lines.push('_（內容過長已截斷。完整版在分支 `feature/' + jiraId +
-                 '` 的 `workspace/ra_outputs/RA-' + jiraId + '-light-spec.md`。）_');
+      lines.push('_（內容過長，上面是節錄；完整版在本則的附件裡。）_');
     }
   } else {
     const failed = (body.status === 'failed') || !!body.error;
@@ -246,7 +308,12 @@ function handleLightRaResult(body, key, provider) {
     lines.push('<' + body.run_url + '|執行記錄>');
   }
 
-  provider.postMessage(conv.channel, lines.join('\n'), conv.thread || conv.thread_ts || null);
+  const posted = provider.postMessage(conv.channel, lines.join('\n'),
+                                      conv.thread || conv.thread_ts || null);
+
+  // 附件（截斷時的 light-spec 全文，以及 workspace/outbox/ 裡的東西）。
+  // 掛在剛貼出的那則底下，讓「節錄 → 完整檔」相鄰。
+  _postAttachments_(provider, conv, body.attachments, (posted && posted.ts) || null);
 
   return ContentService.createTextOutput(JSON.stringify({ status: 'ok' }))
     .setMimeType(ContentService.MimeType.JSON);
@@ -288,7 +355,15 @@ function handleAskResult(body, key, provider) {
     }
   }
 
-  provider.postMessage(conv.channel, lines.join('\u000a'), conv.thread || conv.thread_ts || null);
+  const posted = provider.postMessage(conv.channel, lines.join('\u000a'), conv.thread || conv.thread_ts || null);
+
+  // 附件。ask 的答案分段送時，augma 只在**最後一段**帶 attachments，
+  // 所以這裡不必自己去重——收到就貼。
+  //
+  // 最典型的一份是「答案太長被截斷，全文在此」：分支三天後會被 ask-cleanup
+  // 刪掉，附件不會，所以那份檔案才是真正留得住的交付。
+  _postAttachments_(provider, conv, body.attachments,
+                    (posted && posted.ts) || null);
 
   return ContentService.createTextOutput(JSON.stringify({ status: 'ok' }))
     .setMimeType(ContentService.MimeType.JSON);

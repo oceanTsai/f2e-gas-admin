@@ -102,8 +102,11 @@ const GENUINE_MISS = ['no-match', 'jira-no-verb', 'verb-no-jira', 'answer-unpars
 /**
  * 依意圖派發。這一層只做路由，實際動作全部交給既有的 handler——
  * 意圖層錯了最多是走錯 handler，不會產生新的失敗模式。
+ *
+ * files：他這則訊息附的檔案（已正規化，見 core/files.js）。路由層必須原樣傳下去
+ * ——走 `@Alice ask …` 有附件、走「幫我查一下…」沒有，會是最莫名其妙的行為差異。
  */
-function routeByIntent(text, conv, userId, provider) {
+function routeByIntent(text, conv, userId, provider, files) {
   const ctx = _buildIntentCtx_(text, conv, provider);
   const intent = getClassifier().classify(ctx);
   console.log('意圖分類：' + JSON.stringify(intent));
@@ -133,19 +136,19 @@ function routeByIntent(text, conv, userId, provider) {
       // ask 串裡的任何一句都是追問。不經過 _askAllowed_ 的密語判斷是刻意的：
       // handleAskRequest 自己會做，而它套用的是同一條豁免（這串受理過就不再
       // 要密語）——在這裡先判一次只會多打一次反查，還可能給出不一致的答案。
-      handleAskRequest(intent.answerText, conv, userId, provider);
+      handleAskRequest(intent.answerText, conv, userId, provider, files);
       return;
 
     case 'run_ra':
-      _triggerPipelineTask_('ra-pipeline', intent.jiraId, conv, userId, provider);
+      _triggerPipelineTask_('ra-pipeline', intent.jiraId, conv, userId, provider, files);
       return;
 
     case 'run_sa':
-      _triggerPipelineTask_('sa-pipeline', intent.jiraId, conv, userId, provider);
+      _triggerPipelineTask_('sa-pipeline', intent.jiraId, conv, userId, provider, files);
       return;
 
     case 'run_full':
-      _triggerPipelineTask_('full-pipeline', intent.jiraId, conv, userId, provider);
+      _triggerPipelineTask_('full-pipeline', intent.jiraId, conv, userId, provider, files);
       return;
 
     case 'status':
@@ -172,7 +175,7 @@ function routeByIntent(text, conv, userId, provider) {
         text: _intentHelpText_(provider, userId, intent),
         // 空字串＝不附按鈕。卡片長什麼樣、value 怎麼編碼都是 provider 的事
         // （見 providers/slack.js 的 postIntentHelp）——core 只決定「要不要給」。
-        offerKey: offerAsk ? _stashAskOffer_(text) : ''
+        offerKey: offerAsk ? _stashAskOffer_(text, files) : ''
       });
     }
   }
@@ -187,10 +190,35 @@ function routeByIntent(text, conv, userId, provider) {
 // 的事，見 providers/slack.js 的 _askOfferBlocks_。
 const ASK_OFFER_TTL = 900;
 
-function _stashAskOffer_(rawText) {
+// ⚠️ 附件要跟著原句一起存。不存的話，「貼一張圖 ＋ 一句規則接不住的話 ＋ 按下
+//    按鈕」會送出一個**沒有附件**的提問，而人完全看不出附件掉了——它就在他自己
+//    那則訊息裡看得見，於是他會認為 agent 看過那張圖然後亂答。
+//
+//    值改成 JSON（{ text, files }），但讀回來時要能吃舊格式：15 分鐘 TTL 內
+//    可能有部署前寫進去的純字串。
+function _stashAskOffer_(rawText, files) {
   const key = 'askq_' + Utilities.getUuid();
-  CacheService.getScriptCache().put(key, String(rawText || ''), ASK_OFFER_TTL);
+  const value = JSON.stringify({
+    text: String(rawText || ''),
+    files: (files && files.length) ? files : undefined
+  });
+  CacheService.getScriptCache().put(key, value, ASK_OFFER_TTL);
   return key;
+}
+
+
+// 讀回 _stashAskOffer_ 存的東西。回 null 代表過期或已經按過。
+//
+// 吃兩種格式：JSON（現行）與純字串（部署前寫進去的）。分不出來就當純字串——
+// 那是舊格式唯一可能的形狀，而猜錯的代價只是少了附件，不是整句話送不出去。
+function _readAskOffer_(key) {
+  const raw = key ? CacheService.getScriptCache().get(key) : null;
+  if (!raw) return null;
+  try {
+    const o = JSON.parse(raw);
+    if (o && typeof o === 'object' && typeof o.text === 'string') return o;
+  } catch (e) { /* 舊格式：純字串 */ }
+  return { text: String(raw), files: undefined };
 }
 
 

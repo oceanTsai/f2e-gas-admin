@@ -372,19 +372,22 @@ function _emptyResponse_() {
 // 共用 handleAskRequest 是刻意的——節流、長度檢查、受理訊息、dispatch 全部
 // 一致，這顆按鈕只是換一個觸發方式，不是第二條路。
 function _handleAskConfirm_(interaction, provider) {
-  const cache = CacheService.getScriptCache();
-  const raw = interaction.askKey ? cache.get(interaction.askKey) : null;
+  // 存的是 { text, files }（見 core/intent.js 的 _stashAskOffer_）。
+  // 附件一起帶回來：他那則訊息裡的圖還在畫面上，送出一個沒有附件的提問，
+  // 他不會知道附件掉了，只會覺得 agent 沒看圖就亂答。
+  const offer = _readAskOffer_(interaction.askKey);
 
-  if (!raw) {
+  if (!offer) {
     // 過期或已經按過。兩者都不該重送——重送一次就是再燒一台 runner。
     provider.notifyTransient(interaction,
       'ℹ️ 這個提問已經送出過，或已超過 15 分鐘。要再問請直接說一次。');
     return _emptyResponse_();
   }
   // 先刪再送：連點兩下時第二次會落到上面那個分支
-  cache.remove(interaction.askKey);
+  CacheService.getScriptCache().remove(interaction.askKey);
 
-  handleAskRequest(raw, interaction.conversation, interaction.userId || interaction.user, provider);
+  handleAskRequest(offer.text, interaction.conversation,
+                   interaction.userId || interaction.user, provider, offer.files);
   return _emptyResponse_();
 }
 

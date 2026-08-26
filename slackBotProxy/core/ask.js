@@ -117,7 +117,7 @@ function _resolveAskIdFromThread_(conv, provider) {
 }
 
 
-function handleAskRequest(args, conv, user, provider) {
+function handleAskRequest(args, conv, user, provider, files) {
   const prompt = _toHalfWidth_(args || '').trim();
 
   const USAGE = [
@@ -127,7 +127,12 @@ function handleAskRequest(args, conv, user, provider) {
   ].join('\u000a');
 
   if (!prompt) {
-    provider.postMessage(conv.channel, provider.mention(user) + ' ⚠️ 要問什麼？' + '\u000a' + USAGE, _replyTarget_(conv));
+    // 只丟一張圖、一個字都沒打時也走這裡。刻意不自動當成「看看這張圖」：
+    // 沒有問題的圖片，agent 只能產出一段泛泛的描述，而那要燒一台 runner。
+    provider.postMessage(conv.channel,
+      provider.mention(user) + ((files && files.length)
+        ? ' ⚠️ 收到你的附件了，但還要說一句「要問什麼」——只有圖片的話我不知道你想知道哪一面。'
+        : ' ⚠️ 要問什麼？') + '\u000a' + USAGE, _replyTarget_(conv));
     return;
   }
 
@@ -188,13 +193,19 @@ function handleAskRequest(args, conv, user, provider) {
   //
   // 受理訊息要講明是不是續問：那決定了「他能不能期待我懂上文」。看起來像客套，
   // 但反查失敗時他會直接從這句話看出來，不必等幾分鐘後收到一則答非所問的回覆。
+  // 附件有沒有被收到，一定要在受理訊息裡講。他上傳了三張圖而我只看到兩張時，
+  // 唯一能發現的時機就是現在——等答案回來才發現，那一輪已經燒掉了。
+  const fileNote = (files && files.length)
+    ? '　（收到 ' + files.length + ' 個附件）'
+    : '';
+
   const anchored = provider.postAccepted(conv,
     (continueId
       ? '🔍 收到 ' + provider.mention(user) + ' 的追問，接續這個 thread 的上文，正在查…'
-      : '🔍 收到 ' + provider.mention(user) + ' 的提問，正在查…') + '\u000a' +
+      : '🔍 收到 ' + provider.mention(user) + ' 的提問，正在查…') + fileNote + '\u000a' +
     '_這需要幾分鐘。查完會回在這則底下。_');
 
-  const ok = dispatchAsk(asked, user, anchored, continueId);
+  const ok = dispatchAsk(asked, user, anchored, continueId, files);
 
   if (ok) {
     // 節流標記只在真的送出去之後才寫：dispatch 失敗時他應該可以立刻重試

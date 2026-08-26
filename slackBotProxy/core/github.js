@@ -17,13 +17,22 @@ const ASK_ID_PATTERN = /^[A-Za-z0-9]+-[0-9]{8}-[0-9]{6}$/;
 // augma 側 memory-answer.yml 的 Validate input 有一份**必須同步**的副本。
 const MEMORY_ID_PATTERN = /^mem\.[0-9]{8}\.[0-9]{6}$/;
 
-function dispatchPipeline(pipelineType, jiraId, conversation, userId) {
+function dispatchPipeline(pipelineType, jiraId, conversation, userId, files) {
   const cleanJiraId = jiraId.trim().toUpperCase();
 
   const clean = {
     jira_id: cleanJiraId,
     conversation: conversation
   };
+
+  // 使用者上傳的檔案／截圖（metadata only，見 core/files.js）。
+  // runner 的每個 Phase job 會各自用 Bot token 抓下來放進 workspace/inbox/。
+  //
+  // 空的時候**不放這個欄位**：client_payload 的 top-level 屬性上限是 10 個，
+  // 而一個空陣列的資訊量是零。
+  if (files && files.length) {
+    clean.files = files;
+  }
 
   // 觸發者的 Slack UID。augma 那側寫進 progress.json 的 requester 欄位——
   // 那是唯一進版控的觸發紀錄（commit author 一律是 augma-bot、conversation
@@ -101,7 +110,7 @@ function dispatchResumeBatch(jiraId, pipeline, rawText, user) {
 //    `||` 對空字串會取右邊——放空字串其實也能運作，但 workflow 那邊的
 //    `if [ -n "$ASK_CONTINUE_ID" ]` 與這裡「有沒有這個欄位」對不上，
 //    日後改任一邊都要重新推一次那條真值表。乾脆讓「沒有」就是不存在。
-function dispatchAsk(prompt, userId, conversation, askId) {
+function dispatchAsk(prompt, userId, conversation, askId, files) {
   const clean = {
     prompt: prompt,
     // 只用來組分支名（ask/<uid>-<timestamp>），所以送 id 而不是顯示名——
@@ -109,6 +118,14 @@ function dispatchAsk(prompt, userId, conversation, askId) {
     user_id: String(userId || 'unknown').replace(/[^A-Za-z0-9]/g, ''),
     conversation: conversation
   };
+
+  // 他附的檔案／截圖（metadata only，見 core/files.js）。ask 是這條路最常見的
+  // 入口——「這個錯誤畫面是什麼原因」的問題本體在圖裡，不在那句話裡。
+  //
+  // 空的時候不放這個欄位（top-level 屬性上限 10 個，目前用掉 4～5 個）。
+  if (files && files.length) {
+    clean.files = files;
+  }
 
   // 樣式在這裡先驗一次。workflow 那邊會再驗同一條（它不能相信呼叫端），
   // 但擋在這裡的好處是：對不上就當新的一輪，人拿得到答案；送過去才被打回來

@@ -162,11 +162,9 @@ const SlackProvider = {
     const res = this.postMessage(channel, summary, threadTs, blocks);
     const messageId = res ? res.ts : null;
 
-    // 附件（補問清單 / 阻塞總覽）掛在同一個 thread，供人閱讀
-    if (ctx.attachments && ctx.attachments.length) {
-      this.uploadFiles({ channel: channel, thread: threadTs || messageId }, ctx.attachments);
-    }
-
+    // 附件（補問清單 / 阻塞總覽）由呼叫端統一處理——見 core/outbound.js 的
+    // _postAttachments_。搬出去的理由：附件失敗時要在 thread 裡講出來，而那段
+    // 邏輯對每條通道都一樣，留在這裡只有決策卡片這一條享受得到。
     return messageId;
   },
 
@@ -289,31 +287,95 @@ const SlackProvider = {
     return res ? res.ts : null;
   },
 
+  // user id → 這個平台的 mention 語法
+  //
+  // core 不可以自己組這個字串：Slack 是 `<@U123>`、Google Chat 是 `<users/123>`，
+  // 寫死的那一種在另一個平台上會渲染成一段沒人看得懂的純文字——那個症狀看起來
+  // 像 bug，不像「provider 還沒實作完」。
+  //
+  // ⚠️ 空值回**空字串**而不是 `<@>`：requester 留空代表「手動觸發，本來就沒有
+  //    觸發者」，那時該完全不提人。實作與 slackBotProxy 那份刻意一致。
+  mention: function (userId) {
+    return userId ? '<@' + userId + '>' : '';
+  },
+
   // 附件上傳：Slack 的 files.upload 已退役，須走 external upload 三步
   // 需要 Bot Token Scope: files:write
+  //
+  // attachments 元素：{ name, content, encoding?, mimetype? }
+  //
+  //   encoding === 'base64'  ← augma 一律送這種（lib/attachments.sh）
+  //     content 是 base64 字串。**二進位安全**：PNG、PDF、zip 都走這條。
+  //
+  //   沒有 encoding          ← 舊版 payload，向下相容
+  //     content 是檔案原文（只有 UTF-8 純文字送得出去）。這條保留是為了部署順序：
+  //     這支先上線、augma 後推的那段時間裡，舊 payload 仍然要能正常上傳。
+  //
+  // ⚠️ 這裡刻意不 throw。附件是**補充**，訊息本文已經貼出去了——為了一個附件
+  //    讓整個 handler 失敗，代價是 augma 那側看到 error 然後重試整則通知（洗頻）。
+  //    改為回傳統計，讓呼叫端決定要不要在 thread 裡說一句「有幾個檔沒上傳成功」。
+  //
+  // 回傳 { ok: <成功數>, failed: <失敗數>, failedNames: [...] }
   uploadFiles: function (conv, attachments) {
+    const list = attachments || [];
+    const result = { ok: 0, failed: 0, failedNames: [] };
+    if (!list.length) return result;
+
     const token = PropertiesService.getScriptProperties().getProperty('SLACK_TOKEN');
-    if (!token) { console.warn('未設定 SLACK_TOKEN，略過附件上傳'); return; }
+    if (!token) {
+      console.warn('未設定 SLACK_TOKEN，略過 ' + list.length + ' 個附件');
+      result.failed = list.length;
+      result.failedNames = list.map(function (a) { return a.name; });
+      return result;
+    }
     const auth = { Authorization: 'Bearer ' + token };
 
-    attachments.forEach(function (a) {
+    list.forEach(function (a) {
+      const name = a.name || 'attachment';
       try {
-        const bytes = Utilities.newBlob(a.content).getBytes().length;
+        let blob;
+        if (String(a.encoding || '').toLowerCase() === 'base64') {
+          blob = Utilities.newBlob(
+            Utilities.base64Decode(a.content),
+            a.mimetype || 'application/octet-stream',
+            name);
+        } else {
+          blob = Utilities.newBlob(a.content, a.mimetype || 'text/plain', name);
+        }
+        // length 必須是**解碼後**的位元組數。拿 base64 字串的長度去填會多 33%，
+        // Slack 會在第三步以 file 尚未上傳完整為由拒收。
+        const bytes = blob.getBytes().length;
+        if (!bytes) {
+          console.error('附件是空的，略過:', name);
+          result.failed++; result.failedNames.push(name);
+          return;
+        }
 
         // ① 取得一次性上傳網址
         const r1 = UrlFetchApp.fetch(
           'https://slack.com/api/files.getUploadURLExternal?filename=' +
-          encodeURIComponent(a.name) + '&length=' + bytes,
+          encodeURIComponent(name) + '&length=' + bytes,
           { headers: auth, muteHttpExceptions: true });
         const j1 = JSON.parse(r1.getContentText());
-        if (!j1.ok) { console.error('getUploadURLExternal 失敗:', j1.error, a.name); return; }
+        if (!j1.ok) {
+          // 最常見：missing_scope（沒有 files:write）。名字印出來才知道是哪一個檔。
+          console.error('getUploadURLExternal 失敗:', j1.error, name);
+          result.failed++; result.failedNames.push(name);
+          return;
+        }
 
-        // ② 上傳內容
-        UrlFetchApp.fetch(j1.upload_url, {
+        // ② 上傳內容。送 Blob 而不是字串：字串會被以 UTF-8 重新編碼，
+        //    二進位檔在這一步就壞掉（而且壞得沒有錯誤訊息，只有打不開的檔案）。
+        const r2 = UrlFetchApp.fetch(j1.upload_url, {
           method: 'post',
-          payload: a.content,
+          payload: blob,
           muteHttpExceptions: true
         });
+        if (r2.getResponseCode() >= 300) {
+          console.error('上傳內容失敗:', r2.getResponseCode(), name);
+          result.failed++; result.failedNames.push(name);
+          return;
+        }
 
         // ③ 完成並貼到對話（thread 內）
         const r3 = UrlFetchApp.fetch('https://slack.com/api/files.completeUploadExternal', {
@@ -321,18 +383,26 @@ const SlackProvider = {
           contentType: 'application/json',
           headers: auth,
           payload: JSON.stringify({
-            files: [{ id: j1.file_id, title: a.name }],
+            files: [{ id: j1.file_id, title: name }],
             channel_id: conv.channel,
             thread_ts: conv.thread || undefined
           }),
           muteHttpExceptions: true
         });
         const j3 = JSON.parse(r3.getContentText());
-        if (!j3.ok) console.error('completeUploadExternal 失敗:', j3.error, a.name);
+        if (!j3.ok) {
+          console.error('completeUploadExternal 失敗:', j3.error, name);
+          result.failed++; result.failedNames.push(name);
+          return;
+        }
+        result.ok++;
       } catch (err) {
-        console.error('附件上傳異常:', a.name, err);
+        console.error('附件上傳異常:', name, err);
+        result.failed++; result.failedNames.push(name);
       }
     });
+
+    return result;
   },
 
   // Slack API 封裝

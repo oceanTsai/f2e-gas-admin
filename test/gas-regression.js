@@ -268,7 +268,13 @@ console.log('\n[0b] provider 邊界 — core 不准自己組平台語法');
   })(CORE_DIR);
   coreFiles.sort();
 
-  const kitHits = [], mentionHits = [];
+  // Slack 事件的欄位名。core 出現任何一個，代表平台格式漏進了業務邏輯——
+  // 入向附件那條路就差點這樣做（正規化本來寫在 core/files.js，後來搬進
+  // SlackProvider.parseFiles）。切 Google Chat 時，這種漏法的症狀是
+  // 「附件靜默消失」：沒有錯誤、沒有 log，只是每次都沒有附件。
+  const SLACK_FIELDS = ['url_private', 'mimetype'];
+
+  const kitHits = [], mentionHits = [], fieldHits = [];
   for (const f of coreFiles) {
     const rel = path.relative(ROOT, f);
     const lines = stripComments(fs.readFileSync(f, 'utf8')).split(NL);
@@ -276,6 +282,9 @@ console.log('\n[0b] provider 邊界 — core 不准自己組平台語法');
       const where = rel + ':' + (i + 1);
       for (const tok of BLOCK_KIT) {
         if (line.indexOf(tok) >= 0) kitHits.push(where + ' → ' + tok);
+      }
+      for (const tok of SLACK_FIELDS) {
+        if (line.indexOf(tok) >= 0) fieldHits.push(where + ' → ' + tok);
       }
       if (line.indexOf('<@') >= 0 && !MENTION_OK.some(a => line.indexOf(a) >= 0)) {
         mentionHits.push(where + ' → ' + line.trim().slice(0, 60));
@@ -290,6 +299,11 @@ console.log('\n[0b] provider 邊界 — core 不准自己組平台語法');
   assert.strictEqual(mentionHits.length, 0,
     'core 自己組了 mention（請改用 provider.mention）：' + NL + mentionHits.join(NL));
   ok('core 一律走 provider.mention（只有 answered_by 與入向樣式例外）');
+
+  assert.strictEqual(fieldHits.length, 0,
+    'core 讀了 Slack 的欄位名（請在 provider.parseFiles 正規化後再交給 core）：' +
+    NL + fieldHits.join(NL));
+  ok('core 沒有任何 Slack 事件欄位名（附件走中性形狀 {name,mime,size,url}）');
 
   // ── GoogleChatProvider 的 stub 要涵蓋 SlackProvider 的公開介面 ──
   //
@@ -1539,6 +1553,42 @@ console.log('\n[3f] slackBotProxy — 反問時的「當成一般提問送出」
   });
   assert.strictEqual(legacy.kind, 'decision', '沒有 kind 的舊卡片要退回 decision');
   ok('舊卡片（value 無 kind）仍走決策路徑——那些卡片可能已躺在 thread 裡好幾天');
+
+  // ── 附件要跟著這顆按鈕走 ────────────────────────────────────────
+  //
+  // 「貼一張圖 ＋ 一句規則接不住的話 ＋ 按下按鈕」是真實會發生的路徑。
+  // 附件掉在這裡的話，人完全看不出來——那張圖就在他自己那則訊息裡看得見，
+  // 於是他會以為 agent 看過圖然後亂答。
+  dispatchAsk = function (prompt, uid, conv, askId, files) {
+    dispatched.push({ prompt: prompt, files: files }); return true;
+  };
+  const FILES = [{ name:'err.png', mime:'image/png', size:99,
+                   url:'https://files.slack.com/f/err.png' }];
+
+  posted.length = 0; dispatched.length = 0;
+  routeByIntent('速速前 這張圖是什麼問題', OUT, 'U3', provider, FILES);
+  const btn3 = findBtn();
+  handleInteraction({ kind:'ask_confirm', askKey: btn3.k, userId:'U3',
+                      conversation:{ channel:'C9', thread:null } }, provider, null);
+  assert.strictEqual(dispatched.length, 1);
+  assert.deepStrictEqual(dispatched[0].files, FILES,
+    '按鈕送出的提問必須帶著原本那則訊息的附件');
+  ok('offer 按鈕 → 附件跟著原句一起送出（不會靜默掉檔）');
+
+  // 舊格式相容：TTL 15 分鐘內可能有部署前寫進去的**純字串**快取值。
+  // 讀不回來的話，那 15 分鐘內每一顆按鈕都會回「已超過 15 分鐘」。
+  //
+  // ⚠️ 換一個 user id：handleAskRequest 有 60 秒節流，沿用 U3 會被那條擋下，
+  //    而症狀（dispatched 是空的）與「舊格式讀不回來」一模一樣。
+  //    密語也要留著——舊格式存的就是使用者打的原句，含密語。
+  dispatched.length = 0;
+  CacheService.getScriptCache().put('askq_legacy', '速速前 幫我查ui的code', 900);
+  handleInteraction({ kind:'ask_confirm', askKey:'askq_legacy', userId:'U4',
+                      conversation:{ channel:'C9', thread:null } }, provider, null);
+  assert.strictEqual(dispatched.length, 1);
+  assert.strictEqual(dispatched[0].prompt, '幫我查ui的code');
+  assert.strictEqual(dispatched[0].files, undefined);
+  ok('舊格式（純字串）的快取值仍送得出去——部署當下那 15 分鐘不會斷');
   `);
 }
 
@@ -2145,5 +2195,266 @@ console.log('\n[8] slackBotProxy — 記憶裁決按鈕（入向）');
   ok('dispatch 失敗 → 不標定案、撤去重、可重試');
   `);
 }
+
+// ══════════════════════════════════════════════════════════════════
+console.log('\n[9] messageDispatch — Slack 附件（出向）');
+// 附件的能力先前只接在決策卡片那一條線上，ask／RA／light-ra 一個都附不了。
+// 這一節守住三件會靜默壞掉的事：
+//   · base64 解碼（送字串上去的話，PNG 會變成一個打不開的檔）
+//   · length 用的是**解碼後**的位元組數（用 base64 長度會多 33%，Slack 拒收）
+//   · 上傳失敗要在 thread 裡講出來（訊息本文可能正寫著「詳見附件」）
+// ══════════════════════════════════════════════════════════════════
+{
+  const env = mkEnv({ NOTIFY_KEY: 'secret', SLACK_TOKEN: 'xoxb-test' });
+  Object.assign(global, env.globals);
+
+  // GAS 的 Blob／base64 替身。newBlob 對 byte 陣列與字串都要成立——
+  // 前者是新的 base64 路徑，後者是舊 payload 的相容路徑。
+  global.Utilities = Object.assign({}, env.globals.Utilities, {
+    base64Decode: (b64) => Array.from(Buffer.from(String(b64), 'base64')),
+    newBlob: (data, type, name) => {
+      const bytes = Array.isArray(data)
+        ? data
+        : Array.from(Buffer.from(String(data), 'utf8'));
+      return { _bytes: bytes, _type: type, _name: name, getBytes: () => bytes };
+    },
+  });
+
+  const api = [];            // 打出去的 Slack API 呼叫
+  let uploadUrlOk = true;    // ① 成功與否
+  global.UrlFetchApp = { fetch: (url, opt) => {
+    api.push({ url, opt });
+    if (url.indexOf('files.getUploadURLExternal') >= 0) {
+      return { getResponseCode: () => 200, getContentText: () => JSON.stringify(
+        uploadUrlOk ? { ok: true, upload_url: 'https://files.slack.com/upload/x', file_id: 'F1' }
+                    : { ok: false, error: 'missing_scope' }) };
+    }
+    if (url.indexOf('files.completeUploadExternal') >= 0) {
+      return { getResponseCode: () => 200, getContentText: () => JSON.stringify({ ok: true }) };
+    }
+    if (url.indexOf('chat.postMessage') >= 0) {
+      return { getResponseCode: () => 200,
+               getContentText: () => JSON.stringify({ ok: true, ts: '9001.1' }) };
+    }
+    return { getResponseCode: () => 200, getContentText: () => '' };
+  }};
+
+  eval(src(['messageDispatch/providers/slack.js',
+            'messageDispatch/providers/googleChat.js',
+            'messageDispatch/providers/index.js',
+            'messageDispatch/core/outbound.js',
+            'messageDispatch/core/memory.js',
+            'messageDispatch/MessageDispatch.gs.js']) + `
+  const b64 = (t) => Buffer.from(t, 'utf8').toString('base64');
+
+  // ① ask_result 帶附件 → 三步都打，且掛在剛貼出的那則底下
+  let res = doPost({ parameter:{ k:'secret' }, postData:{ contents: JSON.stringify({
+    action:'ask_result', ask_id:'U1-20260826-101010', answer:'答案在附件裡',
+    status:'completed', conversation:{ channel:'C1', thread:'1.1' },
+    attachments:[{ name:'api-list.md', content: b64('第一項\\n第二項'),
+                   encoding:'base64', bytes: 19 }] })}});
+  assert.ok(res._t.indexOf('"status":"ok"') >= 0, res._t);
+
+  const getUrl = api.filter(c => c.url.indexOf('getUploadURLExternal') >= 0);
+  assert.strictEqual(getUrl.length, 1, '附件要走 external upload，不能靜默略過');
+  assert.ok(getUrl[0].url.indexOf('filename=api-list.md') >= 0, getUrl[0].url);
+  // length 必須是解碼後的位元組數（\`第一項\\n第二項\` = 19 bytes），不是 base64 字串長度
+  assert.ok(getUrl[0].url.indexOf('&length=19') >= 0,
+    'length 要用解碼後的位元組數，用 base64 長度會被 Slack 拒收：' + getUrl[0].url);
+
+  const complete = api.filter(c => c.url.indexOf('completeUploadExternal') >= 0);
+  assert.strictEqual(complete.length, 1);
+  const cbody = JSON.parse(complete[0].opt.payload);
+  assert.strictEqual(cbody.channel_id, 'C1');
+  assert.strictEqual(cbody.thread_ts, '9001.1', '附件要掛在剛貼出的那則答案底下');
+  ok('ask_result 帶附件 → 走完 external upload 三步且掛對 thread');
+
+  // ② 上傳的內容是**解碼後**的 bytes，不是 base64 字串
+  const put = api.filter(c => c.url.indexOf('/upload/') >= 0);
+  assert.strictEqual(put.length, 1);
+  assert.deepStrictEqual(
+    Buffer.from(put[0].opt.payload.getBytes()).toString('utf8'), '第一項\\n第二項',
+    '送上去的必須是原始位元組——送 base64 字串的話下載回來是一個打不開的檔');
+  ok('base64 內容解碼後才上傳（二進位檔不會壞）');
+
+  // ③ 舊 payload（沒有 encoding 欄位）仍當純文字處理——部署順序的緩衝
+  api.length = 0;
+  doPost({ parameter:{ k:'secret' }, postData:{ contents: JSON.stringify({
+    action:'ask_result', ask_id:'U1-20260826-101010', answer:'x', status:'completed',
+    conversation:{ channel:'C1', thread:'1.1' },
+    attachments:[{ name:'old.txt', content:'hello' }] })}});
+  const put2 = api.filter(c => c.url.indexOf('/upload/') >= 0);
+  assert.strictEqual(Buffer.from(put2[0].opt.payload.getBytes()).toString('utf8'), 'hello');
+  ok('舊 payload（無 encoding）仍當純文字上傳（向下相容）');
+
+  // ④ 上傳失敗 → thread 裡要有一則說明。訊息本文可能正寫著「詳見附件」。
+  api.length = 0; uploadUrlOk = false;
+  doPost({ parameter:{ k:'secret' }, postData:{ contents: JSON.stringify({
+    action:'ask_result', ask_id:'U1-20260826-101010', answer:'詳見附件',
+    status:'completed', conversation:{ channel:'C1', thread:'1.1' },
+    attachments:[{ name:'big.html', content: b64('x'), encoding:'base64' }] })}});
+  const notes = api.filter(c => c.url.indexOf('chat.postMessage') >= 0)
+                   .map(c => JSON.parse(c.opt.payload).text);
+  assert.ok(notes.some(t => t.indexOf('沒有上傳成功') >= 0 && t.indexOf('big.html') >= 0),
+    '附件上傳失敗必須在 thread 裡講出來：' + JSON.stringify(notes));
+  uploadUrlOk = true;
+  ok('附件上傳失敗 → 在 thread 裡明講是哪個檔（不只留在 GAS log）');
+
+  // ⑤ 沒有附件時完全不打 upload 相關 API
+  api.length = 0;
+  doPost({ parameter:{ k:'secret' }, postData:{ contents: JSON.stringify({
+    action:'ask_result', ask_id:'U1-20260826-101010', answer:'一般答案',
+    status:'completed', conversation:{ channel:'C1', thread:'1.1' } })}});
+  assert.strictEqual(api.filter(c => c.url.indexOf('files.') >= 0).length, 0);
+  ok('沒有附件 → 一次 files.* API 都不打');
+
+  // ⑥ light_ra_result：這個 action 先前根本不存在（augma 一直送、這邊一直回
+  //    Unknown action），所以連「認得它」都要守住。
+  api.length = 0;
+  res = doPost({ parameter:{ k:'secret' }, postData:{ contents: JSON.stringify({
+    action:'light_ra_result', jira_id:'VIPOP-9527', spec:'（需求摘要…）',
+    status:'awaiting_decision', requester:'U9', pending_count:2, truncated:true,
+    is_resume:false, conversation:{ channel:'C1', thread:'1.1' },
+    attachments:[{ name:'RA-VIPOP-9527-light-spec.md', content: b64('全文'),
+                   encoding:'base64' }] })}});
+  assert.ok(res._t.indexOf('"status":"ok"') >= 0, 'light_ra_result 必須被認得：' + res._t);
+  const lightMsg = JSON.parse(api.filter(c => c.url.indexOf('chat.postMessage') >= 0)[0].opt.payload);
+  assert.ok(lightMsg.text.indexOf('VIPOP-9527') >= 0);
+  assert.ok(lightMsg.text.indexOf('<@U9>') >= 0, '要 @ 觸發者');
+  // 用 indexOf 而不是 regex：這段字串住在 template literal 裡，
+  // 反斜線跳脫會被 template literal 先吃掉一層，寫成 regex 會變成語法錯誤。
+  assert.ok(lightMsg.text.indexOf('*2* 題需你確認') >= 0, lightMsg.text);
+  assert.ok(lightMsg.text.indexOf('附件') >= 0, '截斷時要指向附件，不是指向 git 分支');
+  assert.strictEqual(api.filter(c => c.url.indexOf('completeUploadExternal') >= 0).length, 1);
+  ok('light_ra_result → 認得、@ 觸發者、講待答題數、截斷時指向附件');
+
+  // ⑦ 錯的 NOTIFY_KEY → 連附件都不能上傳
+  api.length = 0;
+  res = doPost({ parameter:{ k:'wrong' }, postData:{ contents: JSON.stringify({
+    action:'ask_result', ask_id:'U1', answer:'x', conversation:{ channel:'C1' },
+    attachments:[{ name:'x.md', content: b64('x'), encoding:'base64' }] })}});
+  assert.ok(res._t.indexOf('Unauthorized') >= 0);
+  assert.strictEqual(api.length, 0, '未授權時一個 API 都不該打');
+  ok('錯誤的 NOTIFY_KEY → 附件也擋下');
+  `);
+}
+
+
+// ══════════════════════════════════════════════════════════════════
+console.log('\n[10] slackBotProxy — 使用者上傳的附件（入向）');
+// 正規化住在 **provider**（SlackProvider.parseFiles）：這裡讀的每個欄位名都是
+// Slack 的，交給 core 的必須已經是中性形狀。分工與 parseInteraction 相同。
+// 這一側只送 metadata：client_payload 上限 64 KB，一張截圖 base64 就爆掉，
+// 而爆掉的症狀是「問題連送都送不出去」。內容由 runner 帶 Bot token 自己抓。
+// ══════════════════════════════════════════════════════════════════
+{
+  const env = mkEnv({});
+  Object.assign(global, env.globals);
+
+  eval(src(['slackBotProxy/core/text.js',
+            'slackBotProxy/core/conv.js',
+            'slackBotProxy/providers/slack.js']) + `
+  const _normalizeSlackFiles_ = (f) => SlackProvider.parseFiles(f);
+  const F = (o) => Object.assign({ id:'F1', name:'shot.png', mimetype:'image/png',
+                                   size: 1024,
+                                   url_private_download:'https://files.slack.com/f/shot.png' }, o);
+
+  // ① 一般情況：只留下 runner 需要的四個欄位，而且**用中性名字**
+  //    （url_private_download → url、mimetype → mime）。平台欄位名不該漏進
+  //    跨專案契約——切 Google Chat 時 runner 的下載腳本只要換 Authorization。
+  let out = _normalizeSlackFiles_([F({})]);
+  assert.deepStrictEqual(out, [{ name:'shot.png', mime:'image/png',
+                                 size:1024, url:'https://files.slack.com/f/shot.png' }]);
+  ok('event.files → 只帶出 name/mime/size/url（中性欄位名，不照抄 Slack）');
+
+  // ② 沒有附件回 null 而不是 []——dispatch 那側據此決定要不要放這個欄位
+  //    （client_payload 的 top-level 屬性上限是 10 個）
+  assert.strictEqual(_normalizeSlackFiles_([]), null);
+  assert.strictEqual(_normalizeSlackFiles_(undefined), null);
+  ok('沒有附件 → 回 null（不佔一個 client_payload 屬性）');
+
+  // ③ 非 files.slack.com 的網址一律丟掉。runner 會**帶著 Bot token** 去請求它，
+  //    這條是防 token 被送到別人主機上的第一道。
+  out = _normalizeSlackFiles_([
+    F({ url_private_download:'https://evil.example.com/x' }),
+    F({ name:'ok.png', url_private_download:'https://files.slack.com/f/ok.png' }),
+  ]);
+  assert.strictEqual(out.length, 1);
+  assert.strictEqual(out[0].name, 'ok.png');
+  ok('非 files.slack.com 的網址 → 丟掉（token 不會被送到外部主機）');
+
+  // ④ 沒有任何可下載網址的項目（例如 canvas）直接略過，不要送一個抓不到的殼
+  assert.strictEqual(_normalizeSlackFiles_([{ id:'F3', name:'canvas' }]), null);
+  ok('沒有 url_private 的項目 → 略過');
+
+  // ④b 有網址、但本來就沒有 bytes 的三種 mode 也要擋在這裡。送過去的話 runner
+  //     會抓到一張轉址頁或錯誤頁，然後在 manifest 上留一筆看不懂的失敗。
+  assert.strictEqual(_normalizeSlackFiles_([F({ mode:'external' })]), null);
+  assert.strictEqual(_normalizeSlackFiles_([F({ mode:'tombstone' })]), null);
+  assert.strictEqual(_normalizeSlackFiles_([F({ mode:'hidden_by_limit' })]), null);
+  assert.strictEqual(_normalizeSlackFiles_([F({ mode:'snippet' })]).length, 1,
+    '一般的 mode 不可以被誤擋');
+  ok('external／tombstone／hidden_by_limit → 略過（那些沒有 bytes 可下載）');
+
+  // ⑤ 數量上限：十張截圖的提問，agent 讀到一半就用完 context 了
+  const many = [];
+  for (let i = 0; i < 25; i++) many.push(F({ id: 'F' + i }));
+  assert.strictEqual(_normalizeSlackFiles_(many).length, 10);
+  ok('超過 10 個 → 截到 10 個（並在 log 留下實際收到幾個）');
+
+  // ⑥ 檔名截斷：它會被原樣放進 payload
+  out = _normalizeSlackFiles_([F({ name: 'x'.repeat(500) })]);
+  assert.strictEqual(out[0].name.length, 200);
+  ok('過長的檔名 → 截到 200 字元');
+
+  // ⑦ url_private_download 優先於 url_private：後者對某些型別回的是預覽頁
+  out = _normalizeSlackFiles_([{ name:'a.pdf',
+    url_private:'https://files.slack.com/f/preview',
+    url_private_download:'https://files.slack.com/f/download' }]);
+  assert.strictEqual(out[0].url, 'https://files.slack.com/f/download');
+  ok('url_private_download 優先（url_private 可能是預覽頁）');
+  `);
+}
+
+
+// ══════════════════════════════════════════════════════════════════
+console.log('\n[11] slackBotProxy — 附件跟著 dispatch 一起送出');
+// ══════════════════════════════════════════════════════════════════
+{
+  // dispatchWorkflow 沒有 GITHUB_TOKEN 會直接回 false 而不打 API——
+  // 少了這個 seed，整節會「通過得很安靜」（sent 是空的）。
+  const env = mkEnv({ GITHUB_TOKEN: 'ghp-test' });
+  Object.assign(global, env.globals);
+  const sent = [];
+  global.UrlFetchApp = { fetch: (url, opt) => {
+    sent.push({ url, body: JSON.parse(opt.payload) });
+    return { getResponseCode: () => 204, getContentText: () => '' };
+  }};
+
+  eval(src(['slackBotProxy/core/github.js']) + `
+  const FILES = [{ name:'shot.png', mime:'image/png', size:10,
+                   url:'https://files.slack.com/f/shot.png' }];
+
+  // ① ask：有附件就帶上
+  dispatchAsk('這張圖是什麼問題', 'U1', { channel:'C1', thread:'1.1' }, '', FILES);
+  assert.deepStrictEqual(sent[0].body.client_payload.files, FILES);
+  ok('dispatchAsk 帶 files → 進 client_payload');
+
+  // ② 沒有附件時**不放這個欄位**。空陣列只是白佔一個 top-level 屬性（上限 10 個）。
+  sent.length = 0;
+  dispatchAsk('一般提問', 'U1', { channel:'C1' }, '');
+  assert.ok(!('files' in sent[0].body.client_payload),
+    '沒有附件時不該放 files 欄位：' + JSON.stringify(sent[0].body.client_payload));
+  ok('沒有附件 → client_payload 不出現 files 欄位');
+
+  // ③ pipeline 也一樣（@Alice ra VIPOP-123 ＋ 一張規格截圖）
+  sent.length = 0;
+  dispatchPipeline('ra-pipeline', 'vipop-123', { channel:'C1' }, 'U1', FILES);
+  assert.strictEqual(sent[0].body.client_payload.jira_id, 'VIPOP-123');
+  assert.deepStrictEqual(sent[0].body.client_payload.files, FILES);
+  ok('dispatchPipeline 帶 files → RA／SA 也讀得到使用者附的檔');
+  `);
+}
+
 
 console.log('\n✅ ' + passed + ' 項全部通過\n');

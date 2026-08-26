@@ -167,6 +167,14 @@ function _routeMentionEvent_(event, provider) {
   const [cmd, ...rest] = text.split(/\s+/);
   const args = rest.join(' ').trim();
 
+  // 他上傳的檔案／截圖。正規化交給 provider（那裡才認得 Slack 的欄位名），
+  // 往下傳的已經是中性形狀 [{name, mime, size, url}]。
+  //
+  // ⚠️ 只有 **app_mention 事件**拿得到 files——slash command 的 payload 裡沒有
+  //    這個欄位（Slack 不給），所以 `/ask` 那條路永遠沒有附件。要附檔就得
+  //    `@Alice ask …`。這不是我們能修的，但值得知道，否則會以為壞了。
+  const files = provider.parseFiles(event.files);
+
   // thread 與 replyTo 是兩件事，不能合併（見 core/conv.js 的說明）：
   //   thread  ── 真的在 thread 裡才有值，null 是反查用來省掉一次 Slack API 的依據
   //   replyTo ── 他那則訊息自己的 ts。Alice 的回覆要掛在它底下，而不是在頻道裡
@@ -188,15 +196,15 @@ function _routeMentionEvent_(event, provider) {
       break;
 
     case 'ra':
-      _triggerPipelineTask_('ra-pipeline', args, conv, event.user, provider);
+      _triggerPipelineTask_('ra-pipeline', args, conv, event.user, provider, files);
       break;
 
     case 'sa':
-      _triggerPipelineTask_('sa-pipeline', args, conv, event.user, provider);
+      _triggerPipelineTask_('sa-pipeline', args, conv, event.user, provider, files);
       break;
 
     case 'light-ra':
-      _triggerPipelineTask_('light-ra', args, conv, event.user, provider);
+      _triggerPipelineTask_('light-ra', args, conv, event.user, provider, files);
       break;
 
     // 以文字回覆待決問題（按鈕只能傳回預設選項，表達不了「要改成什麼」）
@@ -208,7 +216,7 @@ function _routeMentionEvent_(event, provider) {
     // 自由提問。與 ra / sa / answer 同一層級，不經過意圖分類——
     // 意圖層掛掉時它還能用，熟手直接打也更快。
     case 'ask':
-      handleAskRequest(args, conv, event.user, provider);
+      handleAskRequest(args, conv, event.user, provider, files);
       break;
 
     case 'coding':
@@ -226,13 +234,13 @@ function _routeMentionEvent_(event, provider) {
     // 不是已知指令 → 交給意圖識別（規則層）。
     // 已知指令刻意不走這條：意圖層掛掉時系統還能用，熟練使用者打指令也更快。
     default:
-      routeByIntent(text, conv, event.user, provider);
+      routeByIntent(text, conv, event.user, provider, files);
       break;
   }
   return ContentService.createTextOutput('ok');
 }
 
-function _triggerPipelineTask_(pipelineType, jiraId, conv, user, provider) {
+function _triggerPipelineTask_(pipelineType, jiraId, conv, user, provider, files) {
   if (!jiraId) {
     const hintMap = {
       'ra-pipeline': 'ra',
@@ -267,7 +275,9 @@ function _triggerPipelineTask_(pipelineType, jiraId, conv, user, provider) {
   const anchoredConv = provider.postAccepted(conv, acceptMsg);
 
   // 2. 觸發 GitHub Actions Pipeline
-  const ok = dispatchPipeline(pipelineType, cleanJiraId, anchoredConv, user);
+  //    files 只有 app_mention 路徑有值（slash command 拿不到附件）。
+  //    附一張規格截圖再說「@Alice ra VIPOP-123」是實際會發生的用法。
+  const ok = dispatchPipeline(pipelineType, cleanJiraId, anchoredConv, user, files);
 
   if (ok) {
     // 刻意不再發第二則訊息：上面那則「任務受理」會被 notify-progress 持續更新成

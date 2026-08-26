@@ -14,6 +14,13 @@ const THREAD_SCAN_LIMIT = 100;
 // 同一次執行內的 thread 內容快取（見 fetchThreadTexts）。
 const THREAD_FETCH_MEMO = {};
 
+// 一次最多帶幾個附件。超過的部分丟掉並在 log 留一行——十張截圖的提問，
+// agent 讀到一半就用完 context 了，而它不會知道還有幾張沒讀。
+const SLACK_INBOUND_MAX_FILES = 10;
+
+// 檔名長度上限。Slack 允許很長的檔名，而它會被原樣放進 client_payload。
+const SLACK_INBOUND_MAX_NAME = 200;
+
 const SlackProvider = {
   name: 'slack',
 
@@ -118,6 +125,73 @@ const SlackProvider = {
   },
 
   // 4. 解析 Slack 按鈕互動 payload
+  // 入向附件：Slack 事件的 files[] → 中性形狀（沒有附件時回 null）
+  //
+  // 為什麼在 provider 而不在 core：這裡讀的每一個欄位名都是 Slack 的
+  // （`url_private_download`、`mimetype`、`mode`）。交給 core 的必須已經是
+  // 中性形狀，否則切平台時 core 要跟著改——那正是 parseInteraction 與
+  // postIntentHelp 建立起來的分工。
+  //
+  // ── 為什麼只送 metadata、不送內容 ────────────────────────────────
+  //
+  // `client_payload` 上限 64 KB，一張手機截圖 base64 之後就超過了，而超過的
+  // 症狀是 dispatch 整個失敗——人的問題**連送都送不出去**，比沒有附件功能更糟。
+  // 內容由 runner 自己抓（augma 的 .claude/scripts/slack-fetch-files.sh，
+  // 帶 Bot token 打那個 url）。
+  //
+  // 這一步**不打任何 API**：files 本來就在已經收到的事件 payload 裡，
+  // 所以 Slack Events API 的 3 秒預算不受影響。
+  //
+  // ⚠️ 需要 Bot Token Scope **files:read**：沒有它時 Slack 給的檔案物件是殘缺的
+  //    （可能連 url_private_download 都沒有），而且 runner 下載會拿到一張登入頁
+  //    HTML ＋ HTTP 200。改過 scope 後**必須重新安裝 App** 才生效。
+  //
+  // ⚠️ 回 null 而不是 []：dispatch 那側據此決定要不要放 files 這個屬性
+  //    （client_payload 的頂層屬性上限 10 個）。
+  parseFiles: function (files) {
+    if (!files || !files.length) return null;
+
+    const out = [];
+    for (let i = 0; i < files.length && out.length < SLACK_INBOUND_MAX_FILES; i++) {
+      const f = files[i] || {};
+
+      // 沒有 bytes 可下載的幾種：external 是 Google Drive／外部連結（url_private
+      // 只會轉址過去）、tombstone 是已刪除、hidden_by_limit 是免費方案超額被藏起來。
+      // 送過去只會讓 runner 抓到一張錯誤頁，然後 manifest 上多一筆看不懂的失敗。
+      const mode = String(f.mode || '');
+      if (mode === 'external' || mode === 'tombstone' || mode === 'hidden_by_limit') {
+        console.warn('略過無法下載的附件（mode=' + mode + '）：' + String(f.name || ''));
+        continue;
+      }
+
+      // url_private_download 優先：它是「直接給檔案」的網址，url_private 對某些
+      // 型別回的是一張預覽頁。兩個都沒有就沒得抓（例如 canvas，那不是一個檔案）。
+      const url = f.url_private_download || f.url_private || '';
+      if (!url) continue;
+
+      // 只收 files.slack.com 的網址。runner 會**帶著 Bot token** 去請求它，
+      // 而下載腳本那側也有一份同樣的白名單（兩邊都不能相信對方）。
+      if (url.indexOf('https://files.slack.com/') !== 0) {
+        console.warn('略過非 files.slack.com 的附件網址：' + String(url).slice(0, 60));
+        continue;
+      }
+
+      // 欄位名刻意**不照抄 Slack**：`url_private_download` 叫 `url`、
+      // `mimetype` 叫 `mime`，也不送 file id（runner 只需要「去哪裡拿」）。
+      out.push({
+        name: String(f.name || f.title || 'attachment').slice(0, SLACK_INBOUND_MAX_NAME),
+        mime: String(f.mimetype || ''),
+        size: Number(f.size || 0),
+        url: url
+      });
+    }
+
+    if (files.length > out.length) {
+      console.warn('入向附件：收到 ' + files.length + ' 個，實際帶出 ' + out.length + ' 個');
+    }
+    return out.length ? out : null;
+  },
+
   parseInteraction: function(payload) {
     if (!payload.actions || payload.actions.length === 0) {
       return null;

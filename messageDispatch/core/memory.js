@@ -129,8 +129,11 @@ function handleMemoryResult(body, key, provider) {
 
   // 這份 codebase 一律用 '\u000a' 而不是字面換行——GAS 編輯器貼上時字面換行
   // 在單引號字串裡是語法錯誤，而那個錯誤只有部署上去才看得到。
-  provider.postMessage(conv.channel, lines.join('\u000a'),
-                       conv.thread || conv.thread_ts || null);
+  const posted = provider.postMessage(conv.channel, lines.join('\u000a'),
+                                      conv.thread || conv.thread_ts || null);
+
+  // 附件（例如圖譜的 diff、體檢報表）。共用 outbound.js 的那一段。
+  _postAttachments_(provider, conv, body.attachments, (posted && posted.ts) || null);
 
   return _json_({ status: 'ok' });
 }
