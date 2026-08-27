@@ -187,19 +187,43 @@ const SlackProvider = {
     const threadTs = conv.thread || null;
     const questions = ctx.questions || [];
 
+    // ⚠️ 這裡的文案**不可以描述任何特定 kind**。
+    //    前言是所有題目共用的，而 kind 只有 augma 的 kg.py audit 知道。寫死成
+    //    某一種 kind 的敘述，下一種進來就會被套上不屬於它的說明——實戰踩過：
+    //    `eval-margin`（🟡 檢索門檻餘裕見底）被冠上「兩顆記憶原子互相矛盾」的
+    //    前言，看卡片的人會以為系統壞了。kind-specific 的說明（含「不處理會
+    //    怎樣」）由 augma 放進每題的 `context`，這裡只做排版與分級圖示。
+    //
+    //    分級靠 `severity`（blocker／warning）——payload 一直都有這個欄位，
+    //    只是先前沒用。缺值時不給圖示，不要猜。
+    const ICON = { blocker: '\u{1F534}', warning: '\u{1F7E1}' };
+    const nBlocker = questions.filter(function (q) {
+      return q.severity === 'blocker';
+    }).length;
+    const nWarning = questions.length - nBlocker;
+    const tally = [
+      nBlocker ? ICON.blocker + ' ' + nBlocker : '',
+      nWarning ? ICON.warning + ' ' + nWarning : ''
+    ].filter(Boolean).join('　');
+
     const blocks = [
       {
         type: 'header',
-        text: { type: 'plain_text', text: '\u{1F9E0} 記憶圖譜待裁決', emoji: true }
+        // 有 🔴 才叫「待裁決」。全是 🟡 時那個詞太重——每日 job 天天跑，
+        // 一直喊「待裁決」的下場跟假警報一樣：第三天起就沒人看卡片了。
+        text: {
+          type: 'plain_text',
+          text: nBlocker ? '\u{1F9E0} 記憶圖譜待裁決' : '\u{1F9E0} 記憶圖譜體檢',
+          emoji: true
+        }
       },
       {
         type: 'section',
         block_id: 'decision_progress',
         text: {
           type: 'mrkdwn',
-          text: '共 *' + questions.length + '* 題。這些是**兩顆記憶原子互相矛盾、' +
-                '但沒有人裁決過**的情況——沒裁決的話兩顆都會在檢索裡浮上來，' +
-                '下游拿到的是兩個互斥的「結論」，引用哪一顆變成隨機。'
+          text: '共 *' + questions.length + '* 題需要你決定（' + tally + '）。' +
+                '每題的說明在題目下方，按下按鈕即生效。'
         }
       },
       { type: 'divider' }
@@ -209,9 +233,16 @@ const SlackProvider = {
       const qid = q.id || ('M-' + (qi + 1));
       const options = (q.options && q.options.length) ? q.options : ['A: 同意', 'B: 不同意'];
 
+      // 分級標在**每一題前面**，不是分成兩張卡片。同一批問題拆卡的話，
+      // 「今天總共有幾題」就要人自己把兩張加起來——而漏看一張的成本很高。
+      const icon = ICON[q.severity] || '';
       blocks.push({
         type: 'section',
-        text: { type: 'mrkdwn', text: '*' + qid + '*　' + (q.question || '（缺少問題描述）') }
+        text: {
+          type: 'mrkdwn',
+          text: (icon ? icon + ' ' : '') + '*' + qid + '*　' +
+                (q.question || '（缺少問題描述）')
+        }
       });
       if (q.context) {
         blocks.push({
@@ -282,7 +313,9 @@ const SlackProvider = {
     if (ctx.runUrl) foot.push('<' + ctx.runUrl + '|每日沉澱的執行紀錄>');
     blocks.push({ type: 'context', elements: [{ type: 'mrkdwn', text: foot.join('　·　') }] });
 
-    const summary = '\u{1F9E0} 記憶圖譜有 ' + questions.length + ' 題待裁決';
+    // 通知列（卡片沒展開時看到的那一行）也要跟著分級——很多人只看這一眼。
+    const summary = '\u{1F9E0} 記憶圖譜有 ' + questions.length +
+                    (nBlocker ? ' 題待裁決' : ' 題待處理');
     const res = this.postMessage(channel, summary, threadTs, blocks);
     return res ? res.ts : null;
   },
