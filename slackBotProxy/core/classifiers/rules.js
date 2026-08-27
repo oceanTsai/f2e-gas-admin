@@ -40,6 +40,15 @@ const RE_STATUS = /(狀態|進度|跑到哪|到哪了|做完了嗎|完成了嗎|
 const RE_PURE_STATUS =
   /^((?:現在|目前|這張單|這單|這個單|它|他)\s*(?:的)?\s*){0,3}(狀態|進度|跑到哪|到哪|怎麼樣|怎樣|如何|status|progress)\s*((?:了|嗎|呢|如何|怎樣|怎麼樣|喔|吧|哦)\s*){0,2}[?？!！]*$/i;
 
+// 「整句就是在問額度」。與 RE_PURE_STATUS 同一個立場：只認整句，不認句中出現。
+//
+// ⚠️ 一定要**整句**匹配。「額度」是個會出現在正常討論裡的詞（「額度快用完了，
+//    這張單先別跑」在決策 thread 裡是答覆，不是查詢）。認錯成查詢只是白跑一個
+//    幾秒的 job，但漏認成答覆會把一句閒聊寫進某一題的答案——兩個方向的代價不對稱，
+//    所以這條寧緊勿鬆（`RE_PURE_STATUS` 的取捨方向剛好相反，因為那邊反過來）。
+const RE_PURE_USAGE =
+  /^(claude\s*)?(的)?\s*(額度|用量|扣打|殘量|quota|usage)\s*((?:還剩多少|剩多少|還有多少|多少|如何|怎樣|怎麼樣|了|嗎|呢)\s*){0,2}[?？!！]*$/i;
+
 
 const RulesClassifier = {
   name: 'rules',
@@ -136,6 +145,21 @@ const RulesClassifier = {
         answerText: raw,
         confidence: 'high',
         matchedBy: 'pasted-checklist'
+      });
+    }
+
+    // ── 規則 1.5：整句就是問額度 ──────────────────────────────────
+    //
+    // 排在規則 3 之前的理由與規則 2 一模一樣：在決策 thread 裡問「額度？」
+    // 會被 `thread-has-pending` 當成答覆 dispatch 出去。
+    //
+    // 與其他規則不同的是它**完全不需要單號**——額度是 runner 的屬性，跟任何
+    // JIRA 單無關。所以它也不吃 routeJira，貼在哪裡問都成立。
+    if (RE_PURE_USAGE.test(raw)) {
+      return _intent_({
+        action: 'usage',
+        confidence: 'high',
+        matchedBy: 'pure-usage'
       });
     }
 

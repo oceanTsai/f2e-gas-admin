@@ -145,6 +145,13 @@ function _routeSlashCommand_(e, provider) {
       handleAskRequest(text, conv, user, provider);
       return ContentService.createTextOutput('🔍 收到，正在查…');
 
+    // 查 runner 的 Claude 額度。不吃參數——額度只有一個。
+    // ⚠️ 這個 slash command 要在 Slack App 後台註冊過才會進得來；沒註冊也無害
+    //    （這段就是死碼），而 `@Alice 額度` 那條路不需要任何後台設定。
+    case '/usage':
+      handleUsageQuery(conv, user, provider);
+      return ContentService.createTextOutput('📊 收到，正在跟 runner 要額度…');
+
     case '/coding':
       provider.postMessage(channel, `${provider.mention(user)} ✅ coding 任務已收到\n參數：\`${text || '(無)'}\``, _replyTarget_(conv));
       return ContentService.createTextOutput('🚀 收到，coding 處理中…');

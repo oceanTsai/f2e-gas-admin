@@ -174,6 +174,23 @@ function dispatchMemoryAnswer(memoryId, questionId, choice, user, conversation) 
   });
 }
 
+// 查 runner 的 Claude 額度。
+//
+// 這是最單純的一條 dispatch：沒有單號、沒有提問編號、沒有狀態機——augma 那側
+// 就跑一次 `claude -p /usage`，把純文字結果貼回這個 conversation。
+//
+// conversation 必須在這裡就定案（理由同 dispatchMemoryAnswer）：結果是 augma
+// 主動貼回來的，而這條路沒有任何 progress.json 可以反查錨點。
+//
+// ⚠️ 額度只有**跑 agent 的那台 runner** 知道——那是綁在該機器上的訂閱用量。
+//    所以這件事沒辦法在 GAS 這側算，一定得繞一趟 GitHub Actions。
+function dispatchUsage(conversation, userId) {
+  const uid = String(userId || '').replace(/[^A-Za-z0-9]/g, '');
+  const clean = { conversation: conversation || {} };
+  if (uid) { clean.user_id = uid; }
+  return dispatchWorkflow({ event_type: 'usage', client_payload: clean });
+}
+
 function dispatchWorkflow(payload) {
   const githubToken = PropertiesService.getScriptProperties().getProperty('GITHUB_TOKEN');
   if (!githubToken) {

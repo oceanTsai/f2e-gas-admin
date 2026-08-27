@@ -155,6 +155,10 @@ function routeByIntent(text, conv, userId, provider, files) {
       handleStatusQuery(intent.jiraId, conv, userId, provider);
       return;
 
+    case 'usage':
+      handleUsageQuery(conv, userId, provider);
+      return;
+
     default: {
       // 規則真的沒聽懂時，多給一顆「當成一般提問送出」的按鈕。
       //
