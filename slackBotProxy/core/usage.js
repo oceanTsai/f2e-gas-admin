@@ -22,18 +22,27 @@
 // ═══════════════════════════════════════════════════════════════════
 
 function handleUsageQuery(conv, userId, provider) {
-  const ok = dispatchUsage(conv, userId);
+  // ⚠️ **一定要用 postAccepted，不能用 postMessage + _replyTarget_。**
+  //
+  // 人在頻道裡直接 `@Alice 額度` 時，conv.thread 是 **null**（那句話不在任何
+  // thread 裡，只有 replyTo）。把原始的 conv 送給 augma，幾分鐘後結果回來時
+  // conversation.thread 仍然是 null——通訊層就把答案貼成**頻道層級的新訊息**，
+  // 與受理訊息拆成兩段看起來不相干的東西。實際踩到過。
+  //
+  // postAccepted 回傳的 anchored 把這件事在 dispatch **之前**就定案：
+  // `thread: threadTs || acceptedTs`——沒有現成 thread 時就用受理訊息自己的 ts
+  // 當 thread。這與 ask 完全同構（見 ask.js 的 `anchored`），理由也一樣：
+  // 答案回來時已經沒有任何 Slack 事件可以推導「該貼哪裡」。
+  const anchored = provider.postAccepted(conv,
+    provider.mention(userId) + ' 📊 正在跟 runner 要額度…');
+
+  const ok = dispatchUsage(anchored, userId);
 
   if (!ok) {
     // dispatch 失敗（缺 GITHUB_TOKEN、API 掛了）要當場說。這條路沒有任何
     // 後續訊息會來——augma 根本沒被觸發，沉默等於這個功能看起來壞掉但沒人知道。
-    provider.postMessage(conv.channel,
+    provider.postMessage(anchored.channel,
       provider.mention(userId) + ' ⚠️ 查額度的請求送不出去（GitHub dispatch 失敗）。',
-      _replyTarget_(conv));
-    return;
+      anchored.thread);
   }
-
-  provider.postMessage(conv.channel,
-    provider.mention(userId) + ' 📊 正在跟 runner 要額度…',
-    _replyTarget_(conv));
 }
