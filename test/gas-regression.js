@@ -1808,6 +1808,19 @@ console.log('\n[4] messageDispatch — 出向路由與金鑰驗證');
   assert.ok(outCalls.join('').indexOf('src/auth/login.ts:42') >= 0);
   ok('ask_result → 答案原樣貼回 thread');
 
+  // ask_result 要把 ts 回給呼叫端：續跑那側靠它把進度看板的錨點搬到 thread 底部。
+  // 沒有 ts 的話 augma 只能繼續 chat.update 幾小時前那則受理訊息——看板等於隱形。
+  {
+    const res = doPost({ parameter:{ k:'secret' }, postData:{ contents: JSON.stringify({
+      action:'ask_result', ask_id:'U1-z', conversation:{ channel:'C1', thread:'1700.1' },
+      answer:'ok', status:'completed'
+    })}});
+    const body = JSON.parse(res._t);   // 測試替身的 createTextOutput 把字串放在 _t
+    assert.strictEqual(body.status, 'ok');
+    assert.ok('ts' in body, 'ask_result 必須回傳 ts 欄位（拿不到時為 null，但欄位要在）');
+  }
+  ok('ask_result 回傳 ts → 續跑可據此重新錨定進度看板');
+
   // 沒答案時**一定要**發訊息：人收到的最後一則是「已收到，正在查」，
   // 沉默會讓他一直等，然後再問一次——又燒一次 runner。
   outCalls.length = 0;
@@ -1901,6 +1914,66 @@ console.log('[5] messageDispatch — 進度看板渲染 activity');
   `);
 }
 
+
+
+// ══════════════════════════════════════════════════════════════════
+console.log('[5b] messageDispatch — 決策卡片的連結只印一次');
+// 連結（補問清單、阻塞總覽）對每一題都是同一組。塞進每題的 context 會變成
+// 「Q-001 …詳見補問清單、阻塞總覽 / Q-002 …詳見補問清單、阻塞總覽」，
+// 題目被同一句話切碎。它是整張卡片的脈絡，要印在題目之前、只印一次。
+// ══════════════════════════════════════════════════════════════════
+{
+  const env = mkEnv({ SLACK_BOT_TOKEN: 'xoxb-test' });
+  Object.assign(global, env.globals);
+
+  eval(src(['messageDispatch/providers/slack.js']) + `
+  let sent = null;
+  SlackProvider.postMessage = function (ch, text, threadTs, blocks) {
+    sent = blocks; return { ts: '1700.9' };
+  };
+
+  const twoQuestions = [
+    { id:'Q-001', question:'編輯欄位範圍依哪一版？', options:['A','B'] },
+    { id:'Q-002', question:'數量區間怎麼定義？',     options:['A','B'] }
+  ];
+
+  SlackProvider.postDecision({ channel:'C1', thread:'1700.1' }, {
+    questions: twoQuestions, jiraId:'VIPOP-46162', phase:'ra-phase4', pipeline:'ra-pipeline',
+    links: [ { name:'補問清單', url:'https://x/checkList.html' },
+             { name:'阻塞總覽', url:'https://x/overview.html' } ]
+  });
+
+  // 卡片尾端本來就有一塊 context（「選項無法表達時…」的用法提示），只找帶連結的那塊
+  const linkBlocks = sent.filter(function (b) {
+    return b.type === 'context' && String(b.elements[0].text).indexOf('http') >= 0;
+  });
+  assert.strictEqual(linkBlocks.length, 1, '兩題只該有一塊連結 context，不是每題一塊');
+  const linkText = linkBlocks[0].elements[0].text;
+  assert.ok(linkText.indexOf('<https://x/checkList.html|補問清單>') >= 0);
+  assert.ok(linkText.indexOf('<https://x/overview.html|阻塞總覽>') >= 0);
+  ok('連結渲染成一塊 context，兩個都在，用 Slack 的 <url|name> 語法');
+
+  // 位置：必須在第一題之前
+  const linkIdx = sent.findIndex(function (b) {
+    return b.type === 'context' && String(b.elements[0].text).indexOf('http') >= 0;
+  });
+  const firstQIdx = sent.findIndex(function (b) {
+    return b.type === 'section' && b.text && String(b.text.text).indexOf('Q-001') >= 0;
+  });
+  assert.ok(linkIdx < firstQIdx, '連結要在題目之前，不是夾在題目中間');
+  ok('連結在題目之前');
+
+  // 沒給 links 時不要憑空多出一塊
+  sent = null;
+  SlackProvider.postDecision({ channel:'C1' }, {
+    questions: twoQuestions, jiraId:'VIPOP-1', phase:'ra-phase4', pipeline:'ra-pipeline'
+  });
+  assert.strictEqual(sent.filter(function (b) {
+    return b.type === 'context' && String(b.elements[0].text).indexOf('http') >= 0;
+  }).length, 0);
+  ok('沒有 links → 不多印空白區塊');
+  `);
+}
 
 // ══════════════════════════════════════════════════════════════════
 console.log('[6] messageDispatch — Phase 失敗必須看得出來');
