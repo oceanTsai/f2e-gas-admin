@@ -84,6 +84,9 @@ function handleDecisionRequest(body, key, provider) {
     ? body.questions
     : [body.question || {}];
   const attachments = body.attachments || [];
+  // 卡片層級的連結（補問清單、阻塞總覽…）：整張卡片印一次，不必每題重複。
+  // 形狀是 [{name, url}]，渲染成 Slack mrkdwn 的 <url|name>，排版由 provider 決定。
+  const links = Array.isArray(body.links) ? body.links : [];
 
   if (!conv.channel && !conv.space) {
     return ContentService.createTextOutput(JSON.stringify({ error: 'Missing channel or space in conversation' }))
@@ -95,7 +98,8 @@ function handleDecisionRequest(body, key, provider) {
     questions: questions,
     jiraId: jiraId,
     phase: phase,
-    pipeline: pipeline
+    pipeline: pipeline,
+    links: links
   });
 
   // 附件（補問清單 / 阻塞總覽）掛在卡片底下。走與其他通道相同的那一段，
@@ -365,6 +369,17 @@ function handleAskResult(body, key, provider) {
   _postAttachments_(provider, conv, body.attachments,
                     (posted && posted.ts) || null);
 
-  return ContentService.createTextOutput(JSON.stringify({ status: 'ok' }))
-    .setMimeType(ContentService.MimeType.JSON);
+  // ⚠️ 回傳 ts：呼叫端可能要拿它當**新的進度看板錨點**。
+  //
+  //    看板是 chat.update 同一則受理訊息，而受理訊息只在 ask / 新請求那條路徑才會
+  //    發（postAccepted）。答案觸發的續跑不經過那裡，於是看板更新的是幾小時前那則、
+  //    早就被洗到很上面的訊息——人以為續跑完全沒有進度回報。實測回報過。
+  //
+  //    續跑那側（augma 的 reanchor-board.sh）因此借這個 action 貼一則新訊息，拿回 ts
+  //    寫進 progress.json 的 conversation.status_ts，看板就跟著搬到 thread 底部。
+  //    ts 拿不到時回 null，呼叫端要能接受「沒搬成」而不是當成失敗。
+  return ContentService.createTextOutput(JSON.stringify({
+    status: 'ok',
+    ts: (posted && posted.ts) || null
+  })).setMimeType(ContentService.MimeType.JSON);
 }

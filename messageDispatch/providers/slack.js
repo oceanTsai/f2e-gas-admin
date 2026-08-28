@@ -106,6 +106,23 @@ const SlackProvider = {
       { type: 'divider' }
     ];
 
+    // 卡片層級的連結：整張卡片印一次，放在題目之前。
+    //
+    // 原本這些連結是塞進**每一題的 context**（「…（詳見 <補問清單> · <阻塞總覽>）」），
+    // 三題就重複三次，而它們對每一題都是同一組。連結是整張卡片的脈絡、不是某一題的，
+    // 放這裡讀起來才是「先給你兩份資料，然後開始問」。
+    if (ctx.links && ctx.links.length) {
+      blocks.push({
+        type: 'context',
+        elements: [{
+          type: 'mrkdwn',
+          text: '\u{1F4CE} ' + ctx.links.map(function (l) {
+            return '<' + l.url + '|' + (l.name || l.url) + '>';
+          }).join('\u3000·\u3000')
+        }]
+      });
+    }
+
     questions.forEach(function (q, qi) {
       const qid = q.id || ('Q-' + (qi + 1));
       const qText = q.question || '（缺少問題描述）';
