@@ -162,3 +162,114 @@ function _truncateUtf8_(text, maxBytes) {
     originalBytes: total
   };
 }
+
+
+// ═══════════════════════════════════════════════════════════════════
+//  程式碼脫敏（送 LLM 之前把 code 換成 <code>）
+//
+//  為什麼需要這支：core/classifiers/geminiShadow.js 打的是**免費**的 Gemini
+//  API key——免費 key 的輸入會被拿去訓練。使用者貼上來問「這段在幹嘛」的程式碼
+//  常常帶著業務邏輯或內部命名，不能照樣送出去，只留自然語言的意圖描述就夠了
+//  （分類器只需要知道「他在問程式碼」，不需要知道程式碼寫了什麼）。
+//
+//  演算法（純字串／regex，刻意不用 AST parser——這個 repo 目前沒有任何 build
+//  step，clasp push 純檔案就結束，不想為了脫敏第一次引入套件與編譯流程）：
+//    1. Markdown fenced code block（```…```）與 inline backtick（`…`）先換成 <code>。
+//    2. 剩下的文字依「是不是 ASCII」切成交錯區塊——CJK 字元不算 ASCII。這條邊界
+//       天然對應「中文說明」與「程式碼」的邊界（中文使用者混貼程式碼時，程式碼
+//       本身幾乎全是 ASCII），不需要額外斷詞。
+//    3. 每個 ASCII 區塊再用 `:`／換行切一層（讓「這段 code:」與後面真正的程式碼
+//       分開判斷），對每個子片段套一組「強程式碼指標」regex，命中就整片換成 <code>。
+//    4. 收斂相鄰的 <code>（中間只有空白／標點）成一個，避免逐行程式碼變成
+//       一長串 <code><code><code>。
+//
+//  ⚠️ 已知限制（刻意留著，不假裝沒有——見 test/gas-regression.js 對應斷言）：
+//    a) 純英文句子裡混一段「沒有冒號或換行隔開」的程式碼，會被整句吃掉
+//       （例：`please review this code const a = 1` 整句變 <code>）。這個 repo
+//       中文為主，寧可誤殺一句英文說明，也不要漏放程式碼——跟
+//       core/classifiers/rules.js 的 RE_PURE_USAGE「寧緊勿鬆」是同一個立場。
+//       同一條規則也會誤殺純中文句子尾端剛好接一個 ASCII 分號的情況
+//       （例：`單價是 100;` → `單價是 <code>`）：這條副作用是接受的，不修，
+//       因為「結尾分號」是偵測 `foo();` 這類無其他信號的裸呼叫式唯一的線索。
+//    b) 程式碼字面值裡混中文（`const msg = "你好"`）時，中文片段落在「非 ASCII」
+//       那一段，不會被一起收進 <code>。中文變數名/字串外流的風險比整段商業邏輯
+//       外流小得多，先接受這個已知限制。
+//    c) `_CODE_HARD_RE_` 幾乎是純 JS/TS 語法（const/let/var/function/=>/…）。
+//       實測過 Python、SQL、單行 shell 指令**完全不會被攔到**——它們既沒有這些
+//       關鍵字，也常常沒有結尾分號。下面的 `_looksLikeCodeByDensity_` 是補強，
+//       靠「符號密度」抓一部分（Java／C 家族的大括號、`if (...) { ... }` 這種），
+//       但**不是萬能解**：單純的 SQL `SELECT … FROM …`、或被逐行拆開後每行只剩
+//       零星幾個符號的 shell 迴圈（`for` / `do` / `done` 各自一行），密度算下來
+//       太低，還是會漏放。純 regex／字串啟發式在不維護逐語言關鍵字清單的前提下，
+//       這是能做到的上限——見 test/gas-regression.js 的對應斷言。
+// ═══════════════════════════════════════════════════════════════════
+
+// 「強程式碼指標」：只認會實際出現在程式碼裡的語法符號／保留字組合，
+// 不認裸字（例如單獨的 "code" 或 "class" 這種在英文句子裡也常見的字）。
+// 幾乎是 JS/TS 專屬——見上面已知限制 (c)。
+const _CODE_HARD_RE_ = /=>|===|!==|&&|\|\||\bconst\b|\blet\b|\bvar\b|\bfunction\b|\bclass\s+\w|\bimport\s[\s\S]*\bfrom\b|\brequire\(|;\s*$/;
+
+// 「符號密度」：不認關鍵字，只看這段 ASCII 文字裡「像程式碼的符號」佔比夠不夠
+// 高，補 _CODE_HARD_RE_ 語言侷限的洞（見已知限制 (c)）。門檻是拿真實正／負例
+// 調出來的（test/gas-regression.js `[12]`）：
+//   - 長度 < 8 的片段不判——太短時像 "1+1=2" 這種算式也會被誤觸，資訊量不夠。
+//   - 符號數 ≥ 2 **且**密度 ≥ 10%：兩個條件都要，才擋得住 URL
+//     （`https://…?x=1&y=2` 含 = 與 &，但密度通常 < 10%）跟正常中文句子。
+const _CODE_SYMBOLS_RE_ = /[(){}\[\]<>=+!&|*%^~;_]/g;
+const _CODE_DENSITY_MIN_LEN_ = 8;
+const _CODE_DENSITY_MIN_SYMS_ = 2;
+const _CODE_DENSITY_MIN_RATIO_ = 0.10;
+
+function _looksLikeCodeByDensity_(piece) {
+  if (piece.length < _CODE_DENSITY_MIN_LEN_) return false;
+  const n = (piece.match(_CODE_SYMBOLS_RE_) || []).length;
+  return n >= _CODE_DENSITY_MIN_SYMS_ && (n / piece.length) >= _CODE_DENSITY_MIN_RATIO_;
+}
+
+function _redactCode_(text) {
+  const s = (text == null) ? '' : String(text);
+  if (!s) return s;
+
+  let out = s.replace(/```[\s\S]*?```/g, '<code>');
+  out = out.replace(/`[^`\n]+`/g, '<code>');
+
+  // 交錯切 ASCII／CJK。split 帶 capture group 時，命中的群組固定落在奇數索引
+  // （[前段, 群組1, 中段, 群組2, …]），不用另外判斷「這段是不是 ASCII」。
+  const parts = out.split(/([\x00-\x7F]+)/);
+  for (let i = 1; i < parts.length; i += 2) {
+    parts[i] = _redactAsciiRun_(parts[i]);
+  }
+  out = parts.join('');
+
+  let prev;
+  do {
+    prev = out;
+    out = out.replace(/<code>[ \t\r\n,.;:、，。；：]*<code>/g, '<code>');
+  } while (out !== prev);
+
+  return out;
+}
+
+// 只處理**單一 ASCII 區塊**。前後空白留著不進判斷——那通常是跟中文之間的
+// 分隔（見 _redactCode_ 檔頭的例子：「程式碼 <code>」中間那個空格），
+// 吃掉會讓脫敏後的文字黏在一起，肉眼校對時反而看不出斷點在哪。
+function _redactAsciiRun_(run) {
+  const m = run.match(/^(\s*)([\s\S]*?)(\s*)$/);
+  const lead = m[1], core = m[2], trail = m[3];
+  if (!core) return run;
+
+  const pieces = core.split(/([:\n])/);
+  for (let i = 0; i < pieces.length; i += 2) {
+    if (_CODE_HARD_RE_.test(pieces[i])) { pieces[i] = '<code>'; continue; }
+
+    // 密度檢查跳過「URL 的 scheme 冒號之後那一段」（https 這個字被 `:` 切走後，
+    // 剩下的 //host/path?x=1&y=2 分母變短，很容易被查詢字串裡的 = 與 & 撐過
+    // 密度門檻）。這裡只跳過密度檢查，_CODE_HARD_RE_ 還是照跑——如果有人把
+    // URL 包在真正的程式碼裡（`const url = "https://...";`），前面那段還是會
+    // 被 const 抓到。
+    const prevScheme = (i >= 2 ? pieces[i - 2] : '').trim().split(/\s+/).pop() || '';
+    const isUrlRemainder = /^\/\//.test(pieces[i]) && /^(https?|ftp)$/i.test(prevScheme);
+    if (!isUrlRemainder && _looksLikeCodeByDensity_(pieces[i])) pieces[i] = '<code>';
+  }
+  return lead + pieces.join('') + trail;
+}

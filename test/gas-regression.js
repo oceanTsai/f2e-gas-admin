@@ -109,9 +109,14 @@ console.log('[0] GAS 全域 scope — 專案內所有檔案能否共存');
     'INTENT_CLASSIFIER',  // rules / llm（與 ANSWER_PARSER 分開，曝光面不同）
     'ASK_PASSPHRASE',     // 自由提問的通關密語；設成 off 才是關閉閘門
     'ASK_OWNER',          // 被擋下時要找誰拿密語
-    'MEMORY_CHANNEL'      // 記憶決策卡片要貼到哪個頻道——每日 cron 沒有
+    'MEMORY_CHANNEL',     // 記憶決策卡片要貼到哪個頻道——每日 cron 沒有
                           // conversation 錨點（沒有任何人發過訊息），所以
                           // 必須有一個設定好的固定頻道。見 messageDispatch/core/memory.js
+    'GEMINI_API_KEY',     // Gemini flash-lite 免費 key，只給影子分類用（不接執行）。
+                          // 見 core/classifiers/geminiShadow.js 檔頭的資料保留政策說明
+    'gemini_shadow_log'   // Gemini 影子分類的滾動記錄，見 core/intent.js 的 runGeminiShadow_
+                          // （每分鐘呼叫計數器 gemini_shadow_rate 是 CacheService key，
+                          // 不是 ScriptProperties，不用列在這份白名單）
   ];
   const badProps = [];
 
@@ -2527,6 +2532,308 @@ console.log('\n[11] slackBotProxy — 附件跟著 dispatch 一起送出');
   assert.deepStrictEqual(sent[0].body.client_payload.files, FILES);
   ok('dispatchPipeline 帶 files → RA／SA 也讀得到使用者附的檔');
   `);
+}
+
+
+// ══════════════════════════════════════════════════════════════════
+console.log('\n[12] slackBotProxy — 程式碼脫敏（_redactCode_）');
+// ══════════════════════════════════════════════════════════════════
+{
+  eval(src(['slackBotProxy/core/text.js']) + `
+  // 使用者給的原始例子
+  assert.strictEqual(
+    _redactCode_('幫我查這段程式碼 const a = () => { x... }'),
+    '幫我查這段程式碼 <code>');
+  ok('中文說明 ＋ 裸程式碼 → 程式碼換成 <code>，中間的空格留著');
+
+  // fenced code block／inline backtick（用 fromCharCode 組出反引號，避免跟外層
+  // eval 用的 template literal 撞字元）
+  const BT = String.fromCharCode(96);
+  assert.strictEqual(_redactCode_('這是 ' + BT+BT+BT + 'const a = 1;' + BT+BT+BT + ' 的說明'), '這是 <code> 的說明');
+  ok('fenced code block（三個反引號）→ <code>');
+  assert.strictEqual(_redactCode_('用 ' + BT + 'a+b' + BT + ' 這個變數'), '用 <code> 這個變數');
+  ok('inline backtick（單一反引號）→ <code>');
+
+  // 多行程式碼收斂成一個 <code>
+  assert.strictEqual(
+    _redactCode_('幫我看這兩段:\\nconst a = 1;\\nconst b = 2;'),
+    '幫我看這兩段:\\n<code>');
+  ok('多行程式碼收斂成一個 <code>');
+
+  // 不誤判：純中文、JIRA 單號、純英文單字
+  assert.strictEqual(_redactCode_('今天天氣真好'), '今天天氣真好');
+  assert.strictEqual(_redactCode_('VIPOP-12345 進度'), 'VIPOP-12345 進度');
+  assert.strictEqual(_redactCode_('查詢 API 用量'), '查詢 API 用量');
+  ok('純中文句子／JIRA 單號／純英文單字不誤判成程式碼');
+
+  // 邊界輸入
+  assert.strictEqual(_redactCode_(''), '');
+  assert.strictEqual(_redactCode_(null), '');
+  assert.strictEqual(_redactCode_(undefined), '');
+  ok('空字串／null／undefined 安全回傳');
+
+  // 已知限制 a：純英文句子裡混一段「沒有冒號或換行隔開」的程式碼會整句被吃掉。
+  // 這條斷言是故意的——行為改變（不管是變寬鬆還是變嚴格）都要重新檢視，
+  // 不是靜默接受。
+  assert.strictEqual(
+    _redactCode_('please review this code const a = 1'),
+    '<code>');
+  ok('已知限制：純英文＋無冒號分隔的程式碼會整句被吃掉（寧緊勿鬆）');
+
+  // 已知限制 b：程式碼字面值裡混中文時，中文片段不會被一起收進 <code>。
+  assert.strictEqual(
+    _redactCode_('const msg = "你好"; 這是什麼'),
+    '<code>你好<code> 這是什麼');
+  ok('已知限制：程式碼字面值裡的中文不會被一起收進 <code>');
+
+  // 已知限制 a 的另一個變形：純中文句子尾端剛好接一個 ASCII 分號，也會被
+  // 整句吃掉——這是接受的副作用（結尾分號是偵測裸呼叫式 foo(); 唯一的線索），
+  // 不是 bug，故意留著測，行為改變要重新檢視。
+  assert.strictEqual(_redactCode_('這件事先這樣，之後再討論;'), '這件事先這樣，之後再討論<code>');
+  assert.strictEqual(_redactCode_('單價是 100;'), '單價是 <code>');
+  ok('已知限制：純中文句尾巧合接分號，會被誤殺（接受的副作用，不修）');
+
+  // 符號密度補強：_CODE_HARD_RE_ 幾乎是 JS/TS 語法，Java／C 家族靠大括號、
+  // if (...) { ... } 這種符號密度高的片段，補強後能接住。
+  assert.strictEqual(
+    _redactCode_('幫我看 public int add(int a, int b) { return a + b }'),
+    '幫我看 <code>');
+  assert.strictEqual(
+    _redactCode_('幫我看 if (x > 0) { y = 1; }'),
+    '幫我看 <code>');
+  ok('符號密度補強：Java 方法／JS if 區塊（大括號密度高）現在會被接住');
+
+  // 已知限制 c：符號密度補強不是萬能解——單純的 SQL、被拆成單行的 shell
+  // 指令（for / do / done 各自一行，密度太低）依然接不住，程式碼會整段外流。
+  // 這條斷言故意留著記錄現狀，不是「這樣就夠了」的宣稱。
+  assert.strictEqual(
+    _redactCode_('幫我查這段 SELECT name, email FROM users WHERE id = 1'),
+    '幫我查這段 SELECT name, email FROM users WHERE id = 1');
+  assert.strictEqual(
+    _redactCode_('幫我查這段 for f in *.log; do cat $f; done'),
+    '幫我查這段 for f in *.log; do cat $f; done');
+  ok('已知限制：單純 SQL／逐行拆開的 shell 迴圈符號密度太低，符號密度補強接不住');
+
+  // 符號密度的分母陷阱：URL 的 query string（?x=1&y=2）含 = 與 &，
+  // scheme 後面的冒號把分母切短很容易誤觸密度門檻，特別排除。
+  assert.strictEqual(
+    _redactCode_('參考這個 https://example.com/path?x=1&y=2'),
+    '參考這個 https://example.com/path?x=1&y=2');
+  ok('URL（含 query string）不會被符號密度誤殺');
+  `);
+}
+
+
+// ══════════════════════════════════════════════════════════════════
+console.log('\n[13] slackBotProxy — Gemini 影子分類（classifyWithGeminiShadow）');
+// ══════════════════════════════════════════════════════════════════
+{
+  // ① 沒有 GEMINI_API_KEY → 功能關閉，完全不打 API
+  {
+    const env = mkEnv({});
+    Object.assign(global, env.globals);
+    let calls = 0;
+    global.UrlFetchApp = { fetch: () => { calls++; throw new Error('不該打 API'); } };
+
+    eval(src(['slackBotProxy/core/text.js', 'slackBotProxy/core/classifiers/geminiShadow.js']) + `
+    const r = classifyWithGeminiShadow('幫我查 VIPOP-123 進度', 'VIPOP-123');
+    assert.deepStrictEqual(r, { error: 'no-key' });
+    `);
+    assert.strictEqual(calls, 0, '沒有金鑰時 UrlFetchApp.fetch 不該被呼叫');
+    ok('沒有 GEMINI_API_KEY → { error: "no-key" }，且完全不打 API');
+  }
+
+  // ② 空字串輸入 → 不打 API
+  {
+    const env = mkEnv({ GEMINI_API_KEY: 'test-key' });
+    Object.assign(global, env.globals);
+    let calls = 0;
+    global.UrlFetchApp = { fetch: () => { calls++; throw new Error('不該打 API'); } };
+
+    eval(src(['slackBotProxy/core/text.js', 'slackBotProxy/core/classifiers/geminiShadow.js']) + `
+    const r = classifyWithGeminiShadow('', '');
+    assert.deepStrictEqual(r, { error: 'empty' });
+    `);
+    assert.strictEqual(calls, 0, '空字串時 UrlFetchApp.fetch 不該被呼叫');
+    ok('空字串輸入 → { error: "empty" }，且完全不打 API');
+  }
+
+  // ③ 送出去的 prompt 裡不能出現原始程式碼——脫敏有沒有真的接上的迴歸測試
+  {
+    const env = mkEnv({ GEMINI_API_KEY: 'test-key' });
+    Object.assign(global, env.globals);
+    let sentText = '';
+    let sentUrl = '';
+    global.UrlFetchApp = { fetch: (url, opt) => {
+      sentUrl = url;
+      sentText = JSON.parse(opt.payload).contents[0].parts[0].text;
+      return {
+        getResponseCode: () => 200,
+        getContentText: () => JSON.stringify({ candidates: [{ content: { parts: [
+          { text: JSON.stringify({ category: 'ASK', reason: '在問程式碼' }) }
+        ] } }] })
+      };
+    }};
+
+    eval(src(['slackBotProxy/core/text.js', 'slackBotProxy/core/classifiers/geminiShadow.js']) + `
+    classifyWithGeminiShadow('幫我查這段程式碼 const a = () => { x... }', '');
+    `);
+    assert.ok(sentText.indexOf('const a') < 0, 'prompt 裡不該出現原始程式碼：' + sentText);
+    assert.ok(sentText.indexOf('<code>') >= 0, 'prompt 裡應該看得到脫敏後的 <code>：' + sentText);
+    assert.ok(sentUrl.indexOf('gemini-flash-lite') >= 0, '應該打 flash-lite 模型：' + sentUrl);
+    assert.ok(sentUrl.indexOf('key=test-key') >= 0, '金鑰應該當 query string 帶上：' + sentUrl);
+    ok('打 API 前一定先脫敏，且打的是 flash-lite 端點');
+  }
+
+  // ④ 正常回應 → 分類結果原樣回傳
+  {
+    const env = mkEnv({ GEMINI_API_KEY: 'test-key' });
+    Object.assign(global, env.globals);
+    global.UrlFetchApp = { fetch: () => ({
+      getResponseCode: () => 200,
+      getContentText: () => JSON.stringify({ candidates: [{ content: { parts: [
+        { text: JSON.stringify({ category: 'RA', reason: '要求寫規格書' }) }
+      ] } }] })
+    })};
+
+    eval(src(['slackBotProxy/core/text.js', 'slackBotProxy/core/classifiers/geminiShadow.js']) + `
+    const r = classifyWithGeminiShadow('幫 VIPOP-123 寫規格書', 'VIPOP-123');
+    assert.deepStrictEqual(r, { category: 'RA', reason: '要求寫規格書' });
+    `);
+    ok('mock 正常回應 → 分類結果原樣回傳');
+  }
+
+  // ⑤ 非 200／壞 JSON／模型亂編分類 → 一律回 error，不會把亂編的分類往上傳
+  {
+    const cases = [
+      { name: '非 200', fetch: () => ({ getResponseCode: () => 429, getContentText: () => '' }),
+        expect: { error: 'http-429' } },
+      { name: '壞 JSON', fetch: () => ({ getResponseCode: () => 200, getContentText: () => 'not json' }),
+        expect: { error: 'bad-json' } },
+      { name: '亂編分類', fetch: () => ({
+          getResponseCode: () => 200,
+          getContentText: () => JSON.stringify({ candidates: [{ content: { parts: [
+            { text: JSON.stringify({ category: 'DELETE_EVERYTHING' }) }
+          ] } }] })
+        }), expect: { error: 'bad-category' } }
+    ];
+
+    cases.forEach(function (c) {
+      const env = mkEnv({ GEMINI_API_KEY: 'test-key' });
+      Object.assign(global, env.globals);
+      global.UrlFetchApp = { fetch: c.fetch };
+
+      eval(src(['slackBotProxy/core/text.js', 'slackBotProxy/core/classifiers/geminiShadow.js']) + `
+      const r = classifyWithGeminiShadow('隨便一句話', '');
+      assert.deepStrictEqual(r, ${JSON.stringify(c.expect)}, ${JSON.stringify(c.name)});
+      `);
+    });
+    ok('非 200／壞 JSON／模型亂編分類 → 一律回 error，不往上傳假分類');
+  }
+}
+
+
+// ══════════════════════════════════════════════════════════════════
+console.log('\n[14] slackBotProxy — Gemini 影子分類的掛載（runGeminiShadow_）');
+// ══════════════════════════════════════════════════════════════════
+{
+  const SHADOW_SRC = [
+    'slackBotProxy/core/text.js',
+    'slackBotProxy/core/conv.js',
+    'slackBotProxy/core/decision.js',
+    'slackBotProxy/core/classifiers/geminiShadow.js',
+    'slackBotProxy/core/intent.js'
+  ];
+
+  // ① 成功分類 → 回覆貼在原串下面，記錄寫進 gemini_shadow_log
+  {
+    const env = mkEnv({ GEMINI_API_KEY: 'test-key' });
+    Object.assign(global, env.globals);
+    global.UrlFetchApp = { fetch: () => ({
+      getResponseCode: () => 200,
+      getContentText: () => JSON.stringify({ candidates: [{ content: { parts: [
+        { text: JSON.stringify({ category: 'RA', reason: '要求寫規格書' }) }
+      ] } }] })
+    })};
+    const posted = [];
+    const provider = { postMessage: (ch, text, thread) => posted.push({ ch, text, thread }) };
+
+    eval(src(SHADOW_SRC) + `
+    runGeminiShadow_('幫 VIPOP-123 寫規格書', { channel: 'C1', thread: null, replyTo: '1.1' }, 'U1', provider, 'ra');
+    `);
+
+    assert.strictEqual(posted.length, 1, '應該回覆一則觀察訊息');
+    assert.ok(posted[0].text.indexOf('Gemini 意圖分析判定為：RA') >= 0, posted[0].text);
+
+    const log = JSON.parse(env.props.get('gemini_shadow_log'));
+    assert.strictEqual(log.length, 1);
+    assert.strictEqual(log[0].cmd, 'ra');
+    assert.strictEqual(log[0].cat, 'RA');
+    ok('已知指令（ra）＋ 合法分類 → 回覆貼在原串下面，記錄含 knownCmd 與分類結果');
+  }
+
+  // ② 60 秒內超過每分鐘上限 → 直接跳過，不打 API、不回覆
+  {
+    const env = mkEnv({ GEMINI_API_KEY: 'test-key' });
+    Object.assign(global, env.globals);
+    let calls = 0;
+    global.UrlFetchApp = { fetch: () => {
+      calls++;
+      return {
+        getResponseCode: () => 200,
+        getContentText: () => JSON.stringify({ candidates: [{ content: { parts: [
+          { text: JSON.stringify({ category: 'ASK' }) }
+        ] } }] })
+      };
+    }};
+    const posted = [];
+    const provider = { postMessage: (ch, text, thread) => posted.push({ ch, text, thread }) };
+
+    eval(src(SHADOW_SRC) + `
+    for (let i = 0; i < 11; i++) {
+      runGeminiShadow_('第 ' + i + ' 句', { channel: 'C1' }, 'U1', provider, '(intent)');
+    }
+    `);
+
+    assert.strictEqual(calls, 10, '每分鐘上限應該是 10 次，第 11 次不該再打 API');
+    assert.strictEqual(posted.length, 10, '被節流的那次不該多回覆一則訊息');
+    ok('每分鐘上限擋下超量呼叫，不多打 API 也不多回覆');
+  }
+
+  // ③ Gemini 回錯誤 → 不回覆任何訊息，但記錄裡看得到這筆失敗
+  {
+    const env = mkEnv({ GEMINI_API_KEY: 'test-key' });
+    Object.assign(global, env.globals);
+    global.UrlFetchApp = { fetch: () => ({ getResponseCode: () => 500, getContentText: () => '' }) };
+    const posted = [];
+    const provider = { postMessage: (ch, text, thread) => posted.push({ ch, text, thread }) };
+
+    eval(src(SHADOW_SRC) + `
+    runGeminiShadow_('這句會失敗', { channel: 'C1' }, 'U1', provider, '(intent)');
+    `);
+
+    assert.strictEqual(posted.length, 0, 'Gemini 失敗時不該回覆任何訊息（見「已知的架構代價」第 3 點）');
+    const log = JSON.parse(env.props.get('gemini_shadow_log'));
+    assert.strictEqual(log[0].err, 'http-500');
+    ok('Gemini 回錯誤 → 靜默（不回覆），但記錄裡留得下這筆失敗方便事後查');
+  }
+
+  // ④ 沒有 GEMINI_API_KEY → 完全不影響（不回覆、不丟例外），這是最重要的回歸保證：
+  //    這支旁支功能關掉時，一行都不能動到既有行為。
+  {
+    const env = mkEnv({});
+    Object.assign(global, env.globals);
+    global.UrlFetchApp = { fetch: () => { throw new Error('不該打 API'); } };
+    const posted = [];
+    const provider = { postMessage: (ch, text, thread) => posted.push({ ch, text, thread }) };
+
+    eval(src(SHADOW_SRC) + `
+    runGeminiShadow_('隨便一句話', { channel: 'C1' }, 'U1', provider, 'ra');
+    `);
+
+    assert.strictEqual(posted.length, 0, '沒有金鑰時不該有任何觀察訊息');
+    ok('沒有 GEMINI_API_KEY → 完全靜默，不影響任何既有行為');
+  }
 }
 
 

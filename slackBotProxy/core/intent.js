@@ -312,3 +312,118 @@ function clearIntentMisses() {
   PropertiesService.getScriptProperties().deleteProperty(INTENT_MISS_KEY);
   console.log('已清空未命中語料。');
 }
+
+
+// ═══════════════════════════════════════════════════════════════════
+//  Gemini 影子分類——只記錄、只回報，不接執行
+//
+//  掛在 slackBotProxy.js 的 _routeMentionEvent_ 最尾端（switch 執行完之後）：
+//  不管這句話最後是哪個已知指令、還是走了 routeByIntent，都額外跑一次 Gemini
+//  flash-lite 分類，貼出來給人肉眼核對「Gemini 猜得準不準」。
+//
+//  ⚠️ 從頭到尾**只讀不寫**：不會影響 knownCmd／routeByIntent 已經做的任何決定，
+//     這裡拿到的 result 只拿去記錄與回覆，不會被拿去 dispatch 任何 pipeline。
+//     真的要把 LLM 接進生產路由是另一個決定（core/classifiers/llm.js，尚未做）。
+//
+//  ⚠️ 整支包在 try/catch：這是掛在**所有** @Alice 訊息尾端的旁支功能，
+//     Gemini 配額用完、UrlFetchApp 逾時、JSON 格式跑掉都不能讓主流程（已經
+//     執行完的 ra/sa/ask/…）看起來像失敗了。
+// ═══════════════════════════════════════════════════════════════════
+
+const GEMINI_SHADOW_LOG_KEY = 'gemini_shadow_log';
+const GEMINI_SHADOW_LOG_MAX = 60;     // 同 INTENT_MISS_MAX 的理由：ScriptProperties 單筆 9KB 上限
+
+// 每分鐘上限，抓保守值——免費配額被一波洗版式的訊息燒光，比少幾筆觀察資料更糟。
+const GEMINI_SHADOW_RATE_KEY = 'gemini_shadow_rate';
+const GEMINI_SHADOW_RATE_LIMIT = 10;
+
+function runGeminiShadow_(text, conv, userId, provider, knownCmd) {
+  try {
+    if (!_geminiShadowRateOk_()) return;   // 超過上限就整段跳過，不記錄、不報錯
+
+    const raw = _toHalfWidth_(text || '').trim();
+    const jiraInText = _extractJiraKey_(raw);
+    const result = classifyWithGeminiShadow(raw, jiraInText);
+
+    _recordGeminiShadow_(raw, conv, knownCmd, result);
+
+    // 失敗（沒設金鑰／配額用完／逾時／格式跑掉）一律靜默：這些在免費配額下是
+    // 常態而不是意外，每次都回一則錯誤訊息只會把頻道洗成雜訊。只有成功拿到
+    // 合法分類才回覆，讓使用者知道這句話「有」被觀察到、觀察的結果是什麼。
+    if (result.error) return;
+
+    provider.postMessage(
+      conv.channel,
+      'Gemini 意圖分析判定為：' + result.category +
+        (result.reason ? '（' + result.reason + '）' : ''),
+      _replyTarget_(conv)
+    );
+  } catch (err) {
+    console.error('Gemini 影子分類整體失敗（不影響主流程）:', err);
+  }
+}
+
+function _geminiShadowRateOk_() {
+  const cache = CacheService.getScriptCache();
+  const n = parseInt(cache.get(GEMINI_SHADOW_RATE_KEY) || '0', 10);
+  if (n >= GEMINI_SHADOW_RATE_LIMIT) return false;
+  cache.put(GEMINI_SHADOW_RATE_KEY, String(n + 1), 60);
+  return true;
+}
+
+// 記 knownCmd 當 ground truth（已知指令本身的名稱；落到 routeByIntent 的自由
+//文字則記 '(intent)'），才能跟 result.category 並排比對「Gemini 猜得準不準」。
+// 刻意不在這裡重新跑一次規則分類器：routeByIntent 執行當下已經算過一次真正的
+// 判斷了，這裡只是要留下「這句話最後被系統怎麼處理」這個粗粒度資訊，重新計算
+// 只是白付一次成本。
+function _recordGeminiShadow_(text, conv, knownCmd, result) {
+  try {
+    const props = PropertiesService.getScriptProperties();
+    let list = [];
+    try {
+      list = JSON.parse(props.getProperty(GEMINI_SHADOW_LOG_KEY) || '[]');
+      if (!Array.isArray(list)) list = [];
+    } catch (err) {
+      list = [];
+    }
+
+    list.push({
+      t: new Date().toISOString(),
+      cmd: knownCmd || '',
+      cat: result.category || '',
+      err: result.error || '',
+      s: String(text).slice(0, 120),
+      ch: conv && conv.channel ? conv.channel : '',
+      th: conv && conv.thread ? '1' : '0'
+    });
+
+    if (list.length > GEMINI_SHADOW_LOG_MAX) list = list.slice(-GEMINI_SHADOW_LOG_MAX);
+    props.setProperty(GEMINI_SHADOW_LOG_KEY, JSON.stringify(list));
+  } catch (err) {
+    console.error('記錄 Gemini 影子分類失敗:', err);
+  }
+}
+
+/** 在 GAS 編輯器裡手動執行，把累積的 Gemini 影子分類記錄印到執行記錄。 */
+function dumpGeminiShadowLog() {
+  const raw = PropertiesService.getScriptProperties().getProperty(GEMINI_SHADOW_LOG_KEY) || '[]';
+  let list = [];
+  try { list = JSON.parse(raw); } catch (err) { list = []; }
+
+  if (!list.length) {
+    console.log('目前沒有 Gemini 影子分類記錄。');
+    return;
+  }
+
+  console.log(`Gemini 影子分類記錄共 ${list.length} 筆（新到舊）：`);
+  list.slice().reverse().forEach(function (m, i) {
+    const verdict = m.err ? ('❌ ' + m.err) : ('→ ' + m.cat);
+    console.log(`${i + 1}. [${m.t}] 已知路徑=${m.cmd || '(intent)'}  ${verdict}${m.th === '1' ? ' (in-thread)' : ''}  「${m.s}」`);
+  });
+}
+
+/** 記錄看完之後用這支清掉，重新開始收集。 */
+function clearGeminiShadowLog() {
+  PropertiesService.getScriptProperties().deleteProperty(GEMINI_SHADOW_LOG_KEY);
+  console.log('已清空 Gemini 影子分類記錄。');
+}

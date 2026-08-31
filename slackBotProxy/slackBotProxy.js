@@ -244,6 +244,13 @@ function _routeMentionEvent_(event, provider) {
       routeByIntent(text, conv, event.user, provider, files);
       break;
   }
+
+  // Gemini 影子分類：放在 switch 執行完之後，讓真正的回覆（受理訊息／
+  // postIntentHelp…）先出現在 thread 裡，觀察用的判定訊息接在後面，肉眼看
+  // 起來才是「先看到真的回應，再看到一行額外的備註」。見 core/intent.js 的
+  // runGeminiShadow_ 檔頭說明——這支只讀不寫，不影響上面 switch 已經做的事。
+  runGeminiShadow_(text, conv, event.user, provider, cmd.toLowerCase());
+
   return ContentService.createTextOutput('ok');
 }
 
