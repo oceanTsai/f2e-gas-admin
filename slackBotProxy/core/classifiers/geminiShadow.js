@@ -54,13 +54,19 @@ function _geminiShadowPrompt_(sanitizedText, jiraInText) {
 }
 
 /**
- * 回傳 { category, reason } 或 { error }。
+ * 回傳 { category, reason, sanitized } 或 { error, sanitized }。
+ *
+ * `sanitized` 是實際送給 Gemini 的脫敏後文字——只要真的呼叫過 _redactCode_
+ * 就會帶上（連失敗的情況也帶，例如 Gemini 回 500 或格式跑掉），讓呼叫端
+ * （core/intent.js 的 runGeminiShadow_）能把「這次真的送出去的內容」記錄下來
+ * 並回報給使用者核對，而不是只能相信單元測試。`no-key`／`empty` 這兩種一開始
+ * 就沒打 API 的情況，因為根本沒跑到脫敏，不會有這個欄位。
  *
  * error 的可能值：'no-key'（沒設金鑰，功能關閉）、'empty'（空字串，沒打 API）、
  * 'http-<code>'（Gemini 回非 200）、'bad-json'（回應不是合法 JSON）、
  * 'bad-category'（模型自己編了一個不在枚舉裡的分類）、'exception'（其他例外，
- * 例如 UrlFetchApp 本身丟錯）。呼叫端（core/intent.js 的 runGeminiShadow_）
- * 一律把有 error 的結果當「這次觀察不到，靜默跳過」，不當成使用者看得到的錯誤。
+ * 例如 UrlFetchApp 本身丟錯）。呼叫端一律把有 error 的結果當「這次觀察不到，
+ * 靜默跳過」，不當成使用者看得到的錯誤。
  */
 function classifyWithGeminiShadow(text, jiraInText) {
   if (!text) return { error: 'empty' };
@@ -87,7 +93,7 @@ function classifyWithGeminiShadow(text, jiraInText) {
     );
 
     if (resp.getResponseCode() !== 200) {
-      return { error: 'http-' + resp.getResponseCode() };
+      return { error: 'http-' + resp.getResponseCode(), sanitized: sanitized };
     }
 
     let out;
@@ -95,16 +101,16 @@ function classifyWithGeminiShadow(text, jiraInText) {
       const body = JSON.parse(resp.getContentText());
       out = JSON.parse(body.candidates[0].content.parts[0].text);
     } catch (parseErr) {
-      return { error: 'bad-json' };
+      return { error: 'bad-json', sanitized: sanitized };
     }
 
     if (GEMINI_SHADOW_CATEGORIES.indexOf(out && out.category) < 0) {
-      return { error: 'bad-category' };
+      return { error: 'bad-category', sanitized: sanitized };
     }
 
-    return { category: out.category, reason: String(out.reason || '').slice(0, 80) };
+    return { category: out.category, reason: String(out.reason || '').slice(0, 80), sanitized: sanitized };
   } catch (err) {
     console.error('Gemini 影子分類失敗:', err);
-    return { error: 'exception' };
+    return { error: 'exception', sanitized: sanitized };
   }
 }

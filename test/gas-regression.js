@@ -2698,7 +2698,7 @@ console.log('\n[13] slackBotProxy — Gemini 影子分類（classifyWithGeminiSh
 
     eval(src(['slackBotProxy/core/text.js', 'slackBotProxy/core/classifiers/geminiShadow.js']) + `
     const r = classifyWithGeminiShadow('幫 VIPOP-123 寫規格書', 'VIPOP-123');
-    assert.deepStrictEqual(r, { category: 'RA', reason: '要求寫規格書' });
+    assert.deepStrictEqual(r, { category: 'RA', reason: '要求寫規格書', sanitized: '幫 VIPOP-123 寫規格書' });
     `);
     ok('mock 正常回應 → 分類結果原樣回傳');
   }
@@ -2707,15 +2707,15 @@ console.log('\n[13] slackBotProxy — Gemini 影子分類（classifyWithGeminiSh
   {
     const cases = [
       { name: '非 200', fetch: () => ({ getResponseCode: () => 429, getContentText: () => '' }),
-        expect: { error: 'http-429' } },
+        expect: { error: 'http-429', sanitized: '隨便一句話' } },
       { name: '壞 JSON', fetch: () => ({ getResponseCode: () => 200, getContentText: () => 'not json' }),
-        expect: { error: 'bad-json' } },
+        expect: { error: 'bad-json', sanitized: '隨便一句話' } },
       { name: '亂編分類', fetch: () => ({
           getResponseCode: () => 200,
           getContentText: () => JSON.stringify({ candidates: [{ content: { parts: [
             { text: JSON.stringify({ category: 'DELETE_EVERYTHING' }) }
           ] } }] })
-        }), expect: { error: 'bad-category' } }
+        }), expect: { error: 'bad-category', sanitized: '隨便一句話' } }
     ];
 
     cases.forEach(function (c) {
@@ -2764,12 +2764,39 @@ console.log('\n[14] slackBotProxy — Gemini 影子分類的掛載（runGeminiSh
 
     assert.strictEqual(posted.length, 1, '應該回覆一則觀察訊息');
     assert.ok(posted[0].text.indexOf('Gemini 意圖分析判定為：RA') >= 0, posted[0].text);
+    assert.ok(posted[0].text.indexOf('脫敏後送出：幫 VIPOP-123 寫規格書') >= 0, posted[0].text);
 
     const log = JSON.parse(env.props.get('gemini_shadow_log'));
     assert.strictEqual(log.length, 1);
     assert.strictEqual(log[0].cmd, 'ra');
     assert.strictEqual(log[0].cat, 'RA');
-    ok('已知指令（ra）＋ 合法分類 → 回覆貼在原串下面，記錄含 knownCmd 與分類結果');
+    assert.strictEqual(log[0].s, '幫 VIPOP-123 寫規格書');
+    ok('已知指令（ra）＋ 合法分類 → 回覆連同脫敏後的文字一起貼出，記錄含 knownCmd 與分類結果');
+  }
+
+  // ①b 貼了真的程式碼時，回覆與記錄裡看到的都是脫敏後的版本，不是原始程式碼
+  {
+    const env = mkEnv({ GEMINI_API_KEY: 'test-key' });
+    Object.assign(global, env.globals);
+    global.UrlFetchApp = { fetch: () => ({
+      getResponseCode: () => 200,
+      getContentText: () => JSON.stringify({ candidates: [{ content: { parts: [
+        { text: JSON.stringify({ category: 'ASK', reason: '在問一段程式碼' }) }
+      ] } }] })
+    })};
+    const posted = [];
+    const provider = { postMessage: (ch, text, thread) => posted.push({ ch, text, thread }) };
+
+    eval(src(SHADOW_SRC) + `
+    runGeminiShadow_('幫我查這段程式碼 const a = () => { x... }', { channel: 'C1' }, 'U1', provider, 'ask');
+    `);
+
+    assert.ok(posted[0].text.indexOf('const a') < 0, '回覆裡不該出現原始程式碼：' + posted[0].text);
+    assert.ok(posted[0].text.indexOf('脫敏後送出：幫我查這段程式碼 <code>') >= 0, posted[0].text);
+
+    const log = JSON.parse(env.props.get('gemini_shadow_log'));
+    assert.strictEqual(log[0].s, '幫我查這段程式碼 <code>', '記錄裡也不該留原始程式碼');
+    ok('貼真的程式碼時，回覆與記錄看到的都是脫敏後版本，原始程式碼不會外流到 Slack 或 log');
   }
 
   // ② 60 秒內超過每分鐘上限 → 直接跳過，不打 API、不回覆

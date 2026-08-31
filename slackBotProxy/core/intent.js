@@ -345,17 +345,24 @@ function runGeminiShadow_(text, conv, userId, provider, knownCmd) {
     const jiraInText = _extractJiraKey_(raw);
     const result = classifyWithGeminiShadow(raw, jiraInText);
 
-    _recordGeminiShadow_(raw, conv, knownCmd, result);
+    // 記脫敏後的文字（result.sanitized），不是原句：這份 log 的用途之一就是
+    // 核對脫敏有沒有生效，記原句等於自己把要防的東西寫進另一個地方。
+    // 'no-key'／'empty' 沒有 sanitized（根本沒跑到脫敏），退回記原句方便追蹤。
+    _recordGeminiShadow_(result.sanitized || raw, conv, knownCmd, result);
 
     // 失敗（沒設金鑰／配額用完／逾時／格式跑掉）一律靜默：這些在免費配額下是
     // 常態而不是意外，每次都回一則錯誤訊息只會把頻道洗成雜訊。只有成功拿到
     // 合法分類才回覆，讓使用者知道這句話「有」被觀察到、觀察的結果是什麼。
     if (result.error) return;
 
+    // 附上脫敏後實際送出去的內容，讓人能在 Slack 上直接核對「有沒有真的把
+    // 程式碼擋下來」，不用只靠信任單元測試——這正是免費 key 會被拿去訓練這件事
+    // 最在意的一環。result.sanitized 一定有值（走到這裡代表 API 真的打過了）。
     provider.postMessage(
       conv.channel,
       'Gemini 意圖分析判定為：' + result.category +
-        (result.reason ? '（' + result.reason + '）' : ''),
+        (result.reason ? '（' + result.reason + '）' : '') +
+        '\n脫敏後送出：' + result.sanitized,
       _replyTarget_(conv)
     );
   } catch (err) {
