@@ -32,12 +32,12 @@ const GEMINI_SHADOW_CATEGORIES = [
 ];
 
 const GEMINI_SHADOW_CATEGORY_HINTS =
-  'RA＝需求分析／寫規格書\n' +
-  'SA＝系統分析／架構設計／拆 task\n' +
-  'RA-LITE＝輕量需求審查\n' +
-  'SA-LITE＝輕量系統審查\n' +
+  'RA＝需求分析／規格分析/\n' +
+  'SA＝系統分析／架構設計／架構分析/拆 task/拆工項/等等的架構開發類型意圖\n' +
+  'RA-LITE＝輕量需求分析/輕量RA\n' +
+  'SA-LITE＝輕量系統分析/輕量SA\n' +
   'ASK＝自由提問，請 agent 查一個東西\n' +
-  '查額度＝問 Claude 用量／配額還剩多少\n' +
+  '查額度＝問用量／額度還剩多少\n' +
   '查進度＝問某張單目前跑到哪、狀態如何\n' +
   '回答問題＝在回覆先前的一個待決問題或補充答案\n' +
   '不相關閒聊＝以上皆非，單純聊天或跟任務無關';
