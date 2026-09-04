@@ -27,6 +27,9 @@ const RE_FULL   = /(full|整套|全部跑|從頭跑|一路跑|端到端|ra\s*(�
 const RE_SA     = /(\bsa\b|系統分析|系統設計|架構分析|拆\s*task|工項拆解|design\s*doc)/i;
 const RE_RA     = /(\bra\b|需求分析|規格書|寫規格|產規格|\bspec\b|補問)/i;
 const RE_STATUS = /(狀態|進度|跑到哪|到哪了|做完了嗎|完成了嗎|\bstatus\b|\bprogress\b)/i;
+// 單元測試委派。刻意不收單獨的「測試」——那兩個字在對話裡幾乎都是「我測試看看」，
+// 不是要派任務。`\but\b` 收得住「幫 VIPOP-123 補 ut」這種簡寫。
+const RE_UT     = /(unit[\s-]*test|單元測試|寫測試|補測試|測試委派|\but\b)/i;
 
 // 只有「整句就是一個狀態查詢」才優先當 status。
 // 這是為了不讓「用 A 方案，因為進度上比較快」被誤判——那句含「進度」但不是查詢。
@@ -211,6 +214,11 @@ const RulesClassifier = {
 
     // ── 規則 4：有單號 + 動作關鍵字 ───────────────────────────────
     if (jiraInText) {
+      // UT 放最前面：`單元測試` / `unit test` 不會命中下面任何一條，
+      // 但反過來 `拆 task 的測試` 會先被 RE_SA 吃掉。先判最具體的。
+      if (RE_UT.test(raw)) {
+        return _intent_({ action: 'run_ut', jiraId: jiraInText, confidence: 'high', matchedBy: 'jira+ut' });
+      }
       if (RE_FULL.test(raw)) {
         return _intent_({ action: 'run_full', jiraId: jiraInText, confidence: 'high', matchedBy: 'jira+full' });
       }
@@ -230,7 +238,7 @@ const RulesClassifier = {
         jiraId: jiraInText,
         confidence: 'low',
         matchedBy: 'jira-no-verb',
-        restate: `你想對 ${jiraInText} 做什麼？（需求分析 / 系統分析 / 查狀態）`
+        restate: `你想對 ${jiraInText} 做什麼？（需求分析 / 系統分析 / 單元測試 / 查狀態）`
       });
     }
 
@@ -243,15 +251,19 @@ const RulesClassifier = {
     //
     // 補這五行的價值在於：它證明了「接不住」不等於「需要 LLM」。
     // 先把規則補完，再看語料決定要不要接模型。
-    if (RE_FULL.test(raw) || RE_SA.test(raw) || RE_RA.test(raw)) {
-      const what = RE_FULL.test(raw) ? '跑整套流程（RA → SA）'
+    if (RE_UT.test(raw) || RE_FULL.test(raw) || RE_SA.test(raw) || RE_RA.test(raw)) {
+      const what = RE_UT.test(raw)   ? '寫單元測試'
+                 : RE_FULL.test(raw) ? '跑整套流程（RA → SA）'
                  : RE_SA.test(raw)   ? '做系統分析'
                  : '做需求分析';
       return _intent_({
         action: 'unknown',
         confidence: 'low',
         matchedBy: 'verb-no-jira',
-        restate: `你想對哪張單${what}？（例：\`@Alice VIPOP-12345 ${RE_SA.test(raw) && !RE_FULL.test(raw) ? '做系統分析' : '寫規格書'}\`）`
+        restate: `你想對哪張單${what}？（例：\`@Alice VIPOP-12345 ${
+          RE_UT.test(raw) ? '寫單元測試'
+          : RE_SA.test(raw) && !RE_FULL.test(raw) ? '做系統分析'
+          : '寫規格書'}\`）`
       });
     }
 
