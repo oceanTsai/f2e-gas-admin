@@ -161,6 +161,42 @@ function _applySingle_(items, ctx) {
       return q && !q.answered && !pendingCache.get(_answerKey_(jiraId, q.id));
     });
     if (pending.length === 0) {
+      // pending_questions 是 RA / SA 決策點用的欄位。alice 在委派出去的 Issue 上
+      // 提的問題**不會**進到這裡——它只存在 GitHub 的留言裡。所以撲空之後還要
+      // 再看一次 .issues[]：有委派紀錄的話，這句話八成是在回 alice，轉貼過去。
+      //
+      // 不做語意判斷（分不出「回 alice」與「隨口聊天」）。判準是狀態：
+      // 這張單有委派出去的 Issue，而且沒有待決問題——那 thread 裡的回覆
+      // 除了給 alice 之外沒有別的去處。與規則 3 同一個立場。
+      const issues = (progress.issues || []).filter(function (it) {
+        return it && it.repo && it.number;
+      });
+      if (issues.length) {
+        const body = '@104F2E-ALICE ' + answerText;
+        const ok = issues.map(function (it) {
+          return commentOnIssue(it.repo, it.number, body);
+        });
+        const sent = ok.filter(Boolean).length;
+        if (sent) {
+          provider.postMessage(conv.channel,
+            provider.mention(user) + ' 已把你的回覆轉貼到 ' +
+            issues.slice(0, sent).map(function (it) {
+              return '<' + (it.url || ('https://github.com/' + it.repo + '/issues/' + it.number)) +
+                     '|' + it.repo.split('/').pop() + '#' + it.number + '>';
+            }).join('、') + '，alice 會接著做。',
+            _replyTarget_(conv));
+        } else {
+          // 轉貼全掛時一定要講。人以為講完了，實際上 alice 還在等。
+          provider.postMessage(conv.channel,
+            provider.mention(user) + ' ⚠️ 轉貼到 Issue 失敗，請直接到 Issue 上留言並 tag `@104F2E-ALICE`：' +
+            issues.map(function (it) {
+              return '<' + (it.url || ('https://github.com/' + it.repo + '/issues/' + it.number)) + '|#' + it.number + '>';
+            }).join('、'),
+            _replyTarget_(conv));
+        }
+        return;
+      }
+
       provider.postMessage(conv.channel,
         provider.mention(user) + ' ' + jiraId + ' 目前沒有待回覆的問題。', _replyTarget_(conv));
       return;
