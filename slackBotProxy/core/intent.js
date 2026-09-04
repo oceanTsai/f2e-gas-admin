@@ -39,7 +39,7 @@ function _extractJiraKey_(text) {
  * 回傳的意圖契約（每個分類器都必須回這個形狀）：
  *   {
  *     action,       // empty | answer_question | ask_followup | run_ra | run_sa |
- *                   // run_full | status | unknown
+ *                   // run_full | run_ut | status | unknown
  *     jiraId,
  *     answerText,   // action = answer_question / ask_followup 時的原句
  *     items,        // 正規化後的答案 [{ qid, answerText }]。
@@ -149,6 +149,13 @@ function routeByIntent(text, conv, userId, provider, files) {
 
     case 'run_full':
       _triggerPipelineTask_('full-pipeline', intent.jiraId, conv, userId, provider, files);
+      return;
+
+    // 單元測試委派。與上面三條唯一的差別是 pipeline 名稱——augma 那側的
+    // ut-pipeline 自己會先確認 SA 跑完了才往下走，不必在這裡先查一次。
+    // 這裡多查等於把 augma 的狀態機知識複製一份到 GAS，兩邊遲早會不一致。
+    case 'run_ut':
+      _triggerPipelineTask_('ut-pipeline', intent.jiraId, conv, userId, provider, files);
       return;
 
     case 'status':
