@@ -399,6 +399,7 @@ console.log('\n[2] slackBotProxy — 意圖識別規則');
   const env = mkEnv();
   Object.assign(global, env.globals);
   let rootCalls = 0;
+  let progressStub = null;
   const provider = {
     name: 'slack',
     mention: MENTION,
@@ -409,6 +410,10 @@ console.log('\n[2] slackBotProxy — 意圖識別規則');
   const providerNoThread = { name:'slack', mention: MENTION, postIntentHelp: INTENT_HELP, fetchThreadRoot: () => '', postMessage: () => ({}) };
 
   eval(src(INTENT_SRC) + `
+  // 規則 1 的 digest 判斷會呼叫 ctx.getPending() → fetchProgress。
+  // 預設回 null＝讀不到 progress，等同「不是 digest」，既有斷言全部不受影響。
+  fetchProgress = function () { return progressStub; };
+
   const IN  = { provider:'slack', channel:'C1', thread:'1700.1' };
   const OUT = { provider:'slack', channel:'C9', thread:null };
   const c  = (t) => classifyIntent(t, IN,  provider);
@@ -495,6 +500,51 @@ console.log('\n[2] slackBotProxy — 意圖識別規則');
   assert.strictEqual(r.action, 'answer_question');
   assert.strictEqual(r.jiraId, 'VIPOP-46703');
   ok('貼到頻道而非 thread → 用貼上內容自帶的單號，仍認得出是答覆');
+
+  // ── digest 模式：貼上不再流進作答機制 ────────────────────────────
+  //
+  // 擋在分類器而不是下游 answer.js：這份資料根本不會流進去，下游一行都不用改。
+  const Q = (mode) => [
+    { id:'Q-001', phase:'ra-phase4', answered:false, notify_mode: mode },
+    { id:'Q-002', phase:'ra-phase4', answered:false, notify_mode: mode }
+  ];
+
+  progressStub = { jira_key:'VIPOP-46703', pipeline:'ra-pipeline', pending_questions: Q('digest') };
+  r = c(PASTED);
+  assert.strictEqual(r.action, 'unknown', 'digest 單的貼上絕不能變成答覆');
+  assert.strictEqual(r.matchedBy, 'checklist-paste-sealed');
+  assert.ok(r.restate.indexOf('送出答案') >= 0);
+  ok('digest 單貼上補問回覆 → 不流進作答機制，回一句請去頁面送出');
+
+  // 貼進頻道（沒有 thread 路由）也要擋。getPending 要吃得下貼上內容自帶的單號，
+  // 否則這條路會繞過封印——而它正是「複製完隨手貼一份」最容易發生的地方。
+  r = co(PASTED);
+  assert.strictEqual(r.matchedBy, 'checklist-paste-sealed');
+  ok('貼進頻道（無 thread 路由）→ 用自帶單號查到 digest，一樣擋下');
+
+  // ⚠️ 回歸：card 模式一定要照舊收。card 是 digest 的安全網——那些單子的
+  //    按鈕與文字回覆是唯一的作答入口，一起擋掉會讓流程直接卡死。
+  progressStub = { jira_key:'VIPOP-46703', pipeline:'ra-pipeline', pending_questions: Q('card') };
+  r = c(PASTED);
+  assert.strictEqual(r.action, 'answer_question');
+  assert.strictEqual(r.matchedBy, 'pasted-checklist');
+  ok('card 模式 → 貼上照舊當作答覆（card 是 digest 的安全網，不能一起擋）');
+
+  // 沒有 notify_mode 的舊單（這次改動之前寫的）一律不擋：
+  // 放行還能作答，誤擋是死路，兩種錯的代價不對等。
+  progressStub = { jira_key:'VIPOP-46703', pending_questions: [{ id:'Q-001', answered:false }] };
+  assert.strictEqual(c(PASTED).matchedBy, 'pasted-checklist');
+  ok('舊單（無 notify_mode）→ 不擋，維持既有行為');
+
+  // 已答的題留著舊模式是正常的，不該讓它們封住現在
+  progressStub = { jira_key:'VIPOP-46703', pending_questions: [
+    { id:'Q-001', answered:true,  notify_mode:'digest' },
+    { id:'Q-002', answered:false, notify_mode:'card'   }
+  ]};
+  assert.strictEqual(c(PASTED).matchedBy, 'pasted-checklist');
+  ok('只看未答的題（已答題的舊 digest 不影響現在）');
+
+  progressStub = null;
 
   // 貼錯 thread 會靜默寫錯單，一律拒收
   r = c(PASTED.replace('VIPOP-46703', 'VIPOP-99999'));
@@ -898,103 +948,7 @@ console.log('\n[3d] slackBotProxy — 批次派發與去重（與按鈕共用同
 
 
 // ══════════════════════════════════════════════════════════════════
-console.log('\n[3d+] slackBotProxy — digest 模式封印 Slack 作答通道');
-// ══════════════════════════════════════════════════════════════════
-{
-  const env = mkEnv();
-  Object.assign(global, env.globals);
-  const posted = [], dispatched = [];
-  let progressStub = null;
-  const provider = {
-    name: 'slack',
-    mention: MENTION,
-    postIntentHelp: INTENT_HELP,
-    fetchThreadRoot: () => '\u{1F680} 正在啟動 RA-PIPELINE (VIPOP-46703)...',
-    postMessage: (ch, text) => { posted.push(text); return {}; },
-  };
-
-  eval(src(INTENT_SRC) + `
-  fetchProgress = function () { return progressStub; };
-  dispatchResume = function () { dispatched.push('single'); return true; };
-  dispatchResumeBatch = function (jira, pipe, raw, user) {
-    dispatched.push({ jira: jira, pipe: pipe, raw: raw, user: user });
-    return true;
-  };
-
-  const PASTE = [
-    '## VIPOP-46703 PO 補問回覆',
-    '- **Q-001**: A. 甲案',
-    '- **Q-002**: B. 乙案'
-  ].join('\\n');
-
-  const CHECKLIST = { name: 'checkList.html', url: 'https://script.google.com/x/exec?p=VIPOP-46703/checkList.html' };
-  const IN = { provider:'slack', channel:'C1', thread:'1700.1' };
-  const cache = CacheService.getScriptCache();
-  const reset = function () {
-    cache.remove(_answerKey_('VIPOP-46703','Q-001'));
-    cache.remove(_answerKey_('VIPOP-46703','Q-002'));
-    posted.length = 0; dispatched.length = 0;
-  };
-
-  const DIGEST_Q = function () { return [
-      { id:'Q-001', phase:'ra-phase4', resume_action:'continue', answered:false, notify_mode:'digest' },
-      { id:'Q-002', phase:'ra-phase4', resume_action:'continue', answered:false, notify_mode:'digest' }
-    ]; };
-  const CARD_Q = function () { return [
-      { id:'Q-001', phase:'ra-phase4', resume_action:'continue', answered:false, notify_mode:'card' },
-      { id:'Q-002', phase:'ra-phase4', resume_action:'continue', answered:false, notify_mode:'card' }
-    ]; };
-
-  progressStub = { jira_key:'VIPOP-46703', pipeline:'ra-pipeline', artifacts:[CHECKLIST],
-    pending_questions: DIGEST_Q() };
-
-  reset();
-  handleTextAnswer(PASTE, IN, 'U1', provider);
-  assert.strictEqual(dispatched.length, 0, '封印時絕不可 dispatch');
-  assert.ok(posted.some(t => t.indexOf('這裡貼上不會生效') >= 0));
-  assert.ok(posted.some(t => t.indexOf(CHECKLIST.url) >= 0), '要把清單網址一併給出來，不能只說「去網頁」');
-  ok('digest 模式 → Slack 貼文字被擋下，並附上補問清單網址');
-
-  reset();
-  handleTextAnswer('Q-001 我要甲案', IN, 'U1', provider);
-  assert.strictEqual(dispatched.length, 0);
-  assert.ok(posted.some(t => t.indexOf('這裡貼上不會生效') >= 0));
-  ok('單題文字回覆同樣被擋（digest 下 thread 不是作答通道）');
-
-  // ⚠️ 回歸測試：判準曾經是「artifacts 有沒有 checkList.html」，那是錯的。
-  //    publish-html.sh 一律先跑，所以 card 模式下 artifacts 裡**也**有 checkList.html
-  //    ——照那樣判會把手動切 card 的單子一起封掉。所以這裡刻意保留 artifacts。
-  progressStub.pending_questions = CARD_Q();
-  reset();
-  handleTextAnswer(PASTE, IN, 'U1', provider);
-  assert.strictEqual(dispatched.length, 1, 'card 模式的文字回覆必須照舊收');
-  ok('card 模式 → 文字回覆照舊，即使 artifacts 裡有 checkList.html');
-
-  // 舊單（這次改動之前寫的，沒有 notify_mode 欄位）一律不封：
-  // 放行還能作答，誤封是死路，兩種錯的代價不對等。
-  progressStub.pending_questions = DIGEST_Q().map(function (q) {
-    delete q.notify_mode; return q;
-  });
-  reset();
-  handleTextAnswer(PASTE, IN, 'U1', provider);
-  assert.strictEqual(dispatched.length, 1, '沒有 notify_mode 的舊單不該被封');
-  ok('舊單（無 notify_mode）→ 不封印，維持既有行為');
-
-  // 已答的題留著舊模式是正常的，不該讓它們影響現在收不收
-  progressStub.pending_questions = [
-    { id:'Q-001', phase:'ra-phase4', answered:true, notify_mode:'digest' },
-    { id:'Q-002', phase:'ra-phase4', answered:false, notify_mode:'card' }
-  ];
-  reset();
-  handleTextAnswer('Q-002 我要乙案', IN, 'U1', provider);
-  assert.strictEqual(dispatched.length, 1, '只看未答的題，已答的舊 digest 不該封住現在');
-  ok('封印只看未答的題（已答題的舊模式不影響現在）');
-  `);
-}
-
-
-// ══════════════════════════════════════════════════════════════════
-console.log('\n[3d++] googleDriveHtmlPreviewer — 補問清單直送（digest 的唯一作答通道）');
+console.log('\n[3d+] googleDriveHtmlPreviewer — 補問清單直送（digest 的唯一作答通道）');
 // ══════════════════════════════════════════════════════════════════
 {
   const env = mkEnv({ GITHUB_TOKEN: 'ghp_test' });

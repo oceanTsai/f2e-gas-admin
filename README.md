@@ -62,9 +62,10 @@ f2e-gas-admin/
 > previewer 收到後自己對 GitHub 發 `repository_dispatch(resume)`，不經過 `slackBotProxy`。
 >
 > **為什麼不經 `slackBotProxy` 共用它的去重鎖**：`digest` 模式下這一頁是**唯一**的
-> 作答入口——Slack 那則訊息沒有按鈕（走 `notify-ra-result.sh`），而文字回覆已由
-> `slackBotProxy/core/answer.js` 依每題的 `notify_mode` 封掉。沒有第二個寫入者，
-> 就不需要跨專案共用鎖，也就不必為此改動 Slack 機器人主幹。
+> 作答入口——Slack 那則訊息沒有按鈕（走 `notify-ra-result.sh`），而貼回 thread 的
+> 補問回覆已由 `core/classifiers/rules.js` 的規則 1 依每題的 `notify_mode` 擋在
+> 分類器（那份資料根本不會流進作答機制，`core/answer.js` 一行都沒動）。
+> 沒有第二個寫入者，就不需要跨專案共用鎖，也就不必為此改動 Slack 機器人主幹。
 >
 > ⚠️ **這個結論綁死在「`card` 模式不使用」這個前提上。** 哪天 `AUGMA_DECISION_MODE`
 > 真的被切成 `card`，Slack 卡片會長出按鈕，而那些按鈕的題號**與這一頁完全相同**

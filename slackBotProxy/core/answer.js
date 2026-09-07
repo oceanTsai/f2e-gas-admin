@@ -124,40 +124,6 @@ function _parseAnswerText_(raw, pendingQuestions) {
 const BATCH_PAYLOAD_MAX_BYTES = 40000;
 
 function _applyAnswerItems_(items, ctx) {
-  // ── digest 模式：thread 已不是作答通道 ────────────────────────────
-  // 這張單有 checkList.html 就代表卡片是 digest（判準與 augma 的
-  // decision-gateway.sh:181 同一條），PO 該在那一頁按「送出答案」。
-  //
-  // 為什麼要擋而不是兩條都收：同一批答案有兩個入口時，兩邊各自 dispatch、
-  // 兩個 job 併發寫同一份 progress.json，後到的會蓋掉先到的
-  // （augma 的 commit-phase.sh:45 記過這個 run）。頁面已經能直送，就沒有理由
-  // 再留一條會製造競態的路。
-  //
-  // ⚠️ 只擋 digest。沒有 checkList.html 的決策（RA Phase 2 的 repo 勾選題、
-  //    🔴 Blocker、SA 步驟七、記憶裁決…）走的是 card 模式，按鈕與文字回覆
-  //    是它們**唯一**的作答入口，一起擋掉會讓那些流程直接卡死。
-  //
-  // 為什麼擋在這裡、而不是 decision.js 的 handleTextAnswer：這是**派發**路徑的
-  // 守門，放在真正會 dispatch 的那支函式門口，任何日後新增的呼叫端都自動被涵蓋。
-  // 代價是排在「這句話指哪一題」的歧義判斷之後——digest 單上打「第一題選A」
-  // 收到的會是「不確定是哪一題」而不是這則提示。兩者都不會 dispatch，可接受。
-  //
-  // 補問清單頁面的直送**不經過這個專案**：它由 googleDriveHtmlPreviewer 的
-  // submitChecklistAnswers() 直接對 GitHub 發 repository_dispatch。所以這道門
-  // 只擋 Slack 這一側，封印不會把頁面自己擋在門外。
-  if (_isDigestSealed_(ctx.progress)) {
-    const checklist = _checklistArtifact_(ctx.progress);
-    const where = checklist
-      ? '請開 <' + checklist.url + '|補問清單>，勾選後按底部的「送出答案」'
-      : '請開卡片訊息上的補問清單連結，勾選後按底部的「送出答案」';
-    ctx.provider.postMessage(ctx.conv.channel,
-      ctx.provider.mention(ctx.user) + ' \u2139\uFE0F ' + ctx.jiraId +
-      ' 改在補問清單上作答了，這裡貼上不會生效。' + '\u000a' +
-      where + '——送出後流程會自動接續，處理結果一樣會回報到這個 thread。',
-      _replyTarget_(ctx.conv));
-    return;
-  }
-
   if (ctx.mode === 'batch') return _applyBatch_(items, ctx);
   return _applySingle_(items, ctx);
 }
@@ -357,38 +323,4 @@ function _applyBatch_(items, ctx) {
   lines.push('ℹ️ 卡片上這幾題的按鈕可以忽略，點了會被擋下。');
 
   provider.postMessage(conv.channel, lines.join('\u000a'), _replyTarget_(conv));
-}
-
-
-
-// 這張單目前還沒答的題，是不是以 digest 形式通知出去的（＝該去補問清單作答）。
-//
-// 判準是 augma 寫進每一題的 notify_mode（decision-gateway.sh）。
-//
-// ⚠️ **不要**改回「artifacts 裡有沒有 checkList.html」那個判準——它是錯的。
-//    publish-html.sh 一律先跑（ra-phase4 步驟 4 早於步驟 5），所以手動切成
-//    card 模式時 artifacts 裡**也**有 checkList.html。照那樣判會把 card 模式的
-//    單子一起封掉，而 card 的按鈕本來就剝掉了「C. 其他」，等於自由文字作答
-//    整個消失。
-//
-// 只看**未答**的題：已答的題留著舊模式是正常的，不該讓它們影響現在收不收。
-// 欄位不存在（這次改動之前就躺在那裡的舊單）一律不封——放行的單子還能作答，
-// 誤封的單子是死路，兩種錯的代價不對等。
-function _isDigestSealed_(progress) {
-  const qs = (progress && progress.pending_questions) || [];
-  for (let i = 0; i < qs.length; i++) {
-    if (qs[i] && !qs[i].answered && qs[i].notify_mode === 'digest') return true;
-  }
-  return false;
-}
-
-
-// 補問清單的網址，純粹拿來把提示講清楚（「去哪裡作答」）。
-// 這支**不**參與封印判斷——判斷一律看 notify_mode，理由見上。
-function _checklistArtifact_(progress) {
-  const arts = (progress && progress.artifacts) || [];
-  for (let i = 0; i < arts.length; i++) {
-    if (arts[i] && arts[i].name === 'checkList.html') return arts[i];
-  }
-  return null;
 }
