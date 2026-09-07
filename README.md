@@ -45,8 +45,42 @@ f2e-gas-admin/
 | 資料夾 | 用途 | 備註 |
 |---|---|---|
 | `slackBotProxy` | Slack Event Subscription 接收與 app_mention 路由 | GAS Web App，對外 `/exec` |
-| `googleDriveHtmlPreviewer` | 將雲端硬碟 RA 資料夾底下的 HTML 檔直接渲染成網頁 | GAS Web App，`?p=` 帶相對路徑；以存取者身分執行，實際可見範圍由 Drive 權限決定 |
+| `googleDriveHtmlPreviewer` | 將雲端硬碟 RA 資料夾底下的 HTML 檔直接渲染成網頁；並提供補問清單的「送出答案」 | GAS Web App，`?p=` 帶相對路徑；以存取者身分執行，實際可見範圍由 Drive 權限決定 |
 | _（待補）_ | | |
+
+### 部署後要設的 Script Properties
+
+| 專案 | 屬性 | 用途 |
+|---|---|---|
+| `slackBotProxy` | `SLACK_TOKEN` / `GITHUB_TOKEN` / `NOTIFY_KEY` / `CHAT_PROVIDER` | 見 `core/diagnose.js` |
+| `googleDriveHtmlPreviewer` | `GITHUB_TOKEN` | 對 augma 發 `repository_dispatch`（補問清單的「送出答案」） |
+
+> **補問清單的「送出答案」怎麼走**
+> `checkList.html` 是 previewer 用 `HtmlService` 算繪的，所以頁面跑在 previewer 的
+> sandbox 裡，能直接 `google.script.run.submitChecklistAnswers(...)`——不必處理 CORS，
+> 更重要的是**不必把任何金鑰放進那份 HTML**（它躺在 Drive 上、分享給整個根資料夾的名單）。
+> previewer 收到後自己對 GitHub 發 `repository_dispatch(resume)`，不經過 `slackBotProxy`。
+>
+> **為什麼不經 `slackBotProxy` 共用它的去重鎖**：`digest` 模式下這一頁是**唯一**的
+> 作答入口——Slack 那則訊息沒有按鈕（走 `notify-ra-result.sh`），而文字回覆已由
+> `slackBotProxy/core/answer.js` 依每題的 `notify_mode` 封掉。沒有第二個寫入者，
+> 就不需要跨專案共用鎖，也就不必為此改動 Slack 機器人主幹。
+>
+> ⚠️ **這個結論綁死在「`card` 模式不使用」這個前提上。** 哪天 `AUGMA_DECISION_MODE`
+> 真的被切成 `card`，Slack 卡片會長出按鈕，而那些按鈕的題號**與這一頁完全相同**
+> （augma 的 `ra-phase4` 規定卡片題號原樣沿用 `checkList` 的題號）。屆時兩個入口
+> 各有一顆快取、互相看不見，就會回到 `core/answer.js` 開頭記的那個競態。
+> 真要啟用 `card`，正解是把 previewer 改成轉一手給 `slackBotProxy`、共用同一把鎖。
+>
+> **多視窗**：同一份清單開在兩個視窗、兩邊都按送出——前端的按鈕 `disabled` 只鎖得住
+> 同一個頁面實例，跨視窗完全無效。擋下它的是 previewer 的
+> `LockService.getScriptLock()`＋去重快取：鎖負責「同一瞬間只有一個進得去」，
+> 快取負責「進去之後發現這些題已經收過了」。少了鎖，兩個請求會雙雙讀到空快取而
+> 雙雙 dispatch，第二次會把正在跑的 agent 砍掉（phase job 是 `cancel-in-progress`）。
+>
+> ⚠️ `submitChecklistAnswers` 引入 `UrlFetchApp`，previewer 因此多要一個
+> `script.external_request` 權限。部署是 `executeAs: USER_ACCESSING`，所以
+> **既有使用者下次開啟頁面時會被要求重新授權一次**——這是預期內的一次性摩擦。
 
 ---
 

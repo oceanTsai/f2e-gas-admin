@@ -120,7 +120,7 @@ console.log('[0] GAS 全域 scope — 專案內所有檔案能否共存');
   ];
   const badProps = [];
 
-  for (const proj of ['slackBotProxy', 'messageDispatch']) {
+  for (const proj of ['slackBotProxy', 'messageDispatch', 'googleDriveHtmlPreviewer']) {
     const files = [];
     (function walk(d) {
       for (const e of fs.readdirSync(d, { withFileTypes: true })) {
@@ -893,6 +893,216 @@ console.log('\n[3d] slackBotProxy — 批次派發與去重（與按鈕共用同
   assert.strictEqual(dispatched.length, 0);
   assert.ok(posted.some(t => t.indexOf('哪條 pipeline') >= 0));
   ok('批次同樣拒絕在讀不到 pipeline 時接續');
+  `);
+}
+
+
+// ══════════════════════════════════════════════════════════════════
+console.log('\n[3d+] slackBotProxy — digest 模式封印 Slack 作答通道');
+// ══════════════════════════════════════════════════════════════════
+{
+  const env = mkEnv();
+  Object.assign(global, env.globals);
+  const posted = [], dispatched = [];
+  let progressStub = null;
+  const provider = {
+    name: 'slack',
+    mention: MENTION,
+    postIntentHelp: INTENT_HELP,
+    fetchThreadRoot: () => '\u{1F680} 正在啟動 RA-PIPELINE (VIPOP-46703)...',
+    postMessage: (ch, text) => { posted.push(text); return {}; },
+  };
+
+  eval(src(INTENT_SRC) + `
+  fetchProgress = function () { return progressStub; };
+  dispatchResume = function () { dispatched.push('single'); return true; };
+  dispatchResumeBatch = function (jira, pipe, raw, user) {
+    dispatched.push({ jira: jira, pipe: pipe, raw: raw, user: user });
+    return true;
+  };
+
+  const PASTE = [
+    '## VIPOP-46703 PO 補問回覆',
+    '- **Q-001**: A. 甲案',
+    '- **Q-002**: B. 乙案'
+  ].join('\\n');
+
+  const CHECKLIST = { name: 'checkList.html', url: 'https://script.google.com/x/exec?p=VIPOP-46703/checkList.html' };
+  const IN = { provider:'slack', channel:'C1', thread:'1700.1' };
+  const cache = CacheService.getScriptCache();
+  const reset = function () {
+    cache.remove(_answerKey_('VIPOP-46703','Q-001'));
+    cache.remove(_answerKey_('VIPOP-46703','Q-002'));
+    posted.length = 0; dispatched.length = 0;
+  };
+
+  const DIGEST_Q = function () { return [
+      { id:'Q-001', phase:'ra-phase4', resume_action:'continue', answered:false, notify_mode:'digest' },
+      { id:'Q-002', phase:'ra-phase4', resume_action:'continue', answered:false, notify_mode:'digest' }
+    ]; };
+  const CARD_Q = function () { return [
+      { id:'Q-001', phase:'ra-phase4', resume_action:'continue', answered:false, notify_mode:'card' },
+      { id:'Q-002', phase:'ra-phase4', resume_action:'continue', answered:false, notify_mode:'card' }
+    ]; };
+
+  progressStub = { jira_key:'VIPOP-46703', pipeline:'ra-pipeline', artifacts:[CHECKLIST],
+    pending_questions: DIGEST_Q() };
+
+  reset();
+  handleTextAnswer(PASTE, IN, 'U1', provider);
+  assert.strictEqual(dispatched.length, 0, '封印時絕不可 dispatch');
+  assert.ok(posted.some(t => t.indexOf('這裡貼上不會生效') >= 0));
+  assert.ok(posted.some(t => t.indexOf(CHECKLIST.url) >= 0), '要把清單網址一併給出來，不能只說「去網頁」');
+  ok('digest 模式 → Slack 貼文字被擋下，並附上補問清單網址');
+
+  reset();
+  handleTextAnswer('Q-001 我要甲案', IN, 'U1', provider);
+  assert.strictEqual(dispatched.length, 0);
+  assert.ok(posted.some(t => t.indexOf('這裡貼上不會生效') >= 0));
+  ok('單題文字回覆同樣被擋（digest 下 thread 不是作答通道）');
+
+  // ⚠️ 回歸測試：判準曾經是「artifacts 有沒有 checkList.html」，那是錯的。
+  //    publish-html.sh 一律先跑，所以 card 模式下 artifacts 裡**也**有 checkList.html
+  //    ——照那樣判會把手動切 card 的單子一起封掉。所以這裡刻意保留 artifacts。
+  progressStub.pending_questions = CARD_Q();
+  reset();
+  handleTextAnswer(PASTE, IN, 'U1', provider);
+  assert.strictEqual(dispatched.length, 1, 'card 模式的文字回覆必須照舊收');
+  ok('card 模式 → 文字回覆照舊，即使 artifacts 裡有 checkList.html');
+
+  // 舊單（這次改動之前寫的，沒有 notify_mode 欄位）一律不封：
+  // 放行還能作答，誤封是死路，兩種錯的代價不對等。
+  progressStub.pending_questions = DIGEST_Q().map(function (q) {
+    delete q.notify_mode; return q;
+  });
+  reset();
+  handleTextAnswer(PASTE, IN, 'U1', provider);
+  assert.strictEqual(dispatched.length, 1, '沒有 notify_mode 的舊單不該被封');
+  ok('舊單（無 notify_mode）→ 不封印，維持既有行為');
+
+  // 已答的題留著舊模式是正常的，不該讓它們影響現在收不收
+  progressStub.pending_questions = [
+    { id:'Q-001', phase:'ra-phase4', answered:true, notify_mode:'digest' },
+    { id:'Q-002', phase:'ra-phase4', answered:false, notify_mode:'card' }
+  ];
+  reset();
+  handleTextAnswer('Q-002 我要乙案', IN, 'U1', provider);
+  assert.strictEqual(dispatched.length, 1, '只看未答的題，已答的舊 digest 不該封住現在');
+  ok('封印只看未答的題（已答題的舊模式不影響現在）');
+  `);
+}
+
+
+// ══════════════════════════════════════════════════════════════════
+console.log('\n[3d++] googleDriveHtmlPreviewer — 補問清單直送（digest 的唯一作答通道）');
+// ══════════════════════════════════════════════════════════════════
+{
+  const env = mkEnv({ GITHUB_TOKEN: 'ghp_test' });
+  Object.assign(global, env.globals);
+
+  const sent = [];
+  let httpCode = 204;
+  let lockHeld = false;      // 模擬「另一個視窗正在送出」
+  let activeUser = 'po@104.com.tw';
+
+  global.UrlFetchApp = { fetch: (url, opt) => {
+    sent.push({ url: url, body: JSON.parse(opt.payload) });
+    return { getResponseCode: () => httpCode, getContentText: () => '' };
+  }};
+  global.Session = { getActiveUser: () => ({ getEmail: () => activeUser }) };
+  global.LockService = { getScriptLock: () => ({
+    tryLock: () => !lockHeld,
+    releaseLock() {},
+  })};
+  global.DriveApp = {};
+  global.HtmlService = { createHtmlOutput: () => ({ setTitle() { return this; } }) };
+  global.ScriptApp = { getService: () => ({ getUrl: () => 'https://x/exec' }) };
+
+  eval(src(['googleDriveHtmlPreviewer/googleDriveHtmlPreviewer.js']) + `
+  const PASTE = [
+    '## VIPOP-46703 PO 補問回覆',
+    '- **Q-001**: A. 甲案',
+    '- **Q-002**: B. 乙案',
+    '### AI 假設(勾選 = 同意)',
+    '- A-001: 同意'
+  ].join('\\n');
+  const ARGS = { jira_id:'VIPOP-46703', pipeline:'ra-pipeline', answer_batch: PASTE };
+  const cache = CacheService.getScriptCache();
+
+  // ── 送出 ────────────────────────────────────────────────────────
+  let r = submitChecklistAnswers(ARGS);
+  assert.strictEqual(r.ok, true);
+  assert.strictEqual(r.applied, 2);
+  assert.strictEqual(sent.length, 1);
+  assert.ok(sent[0].url.indexOf('/repos/104corp/104.vip.f2e.augma/dispatches') > 0);
+  assert.strictEqual(sent[0].body.event_type, 'resume');
+  assert.strictEqual(sent[0].body.client_payload.jira_id, 'VIPOP-46703');
+  assert.strictEqual(sent[0].body.client_payload.pipeline, 'ra-pipeline');
+  assert.ok(sent[0].body.client_payload.answer_batch.indexOf('Q-002') > 0, '整串原文轉送，格式知識歸 augma');
+  ok('直送 → repository_dispatch(resume)，欄位與 slackBotProxy 那條一致');
+
+  // source 是 resume-workflow.yml 決定「要不要補一則收到回執」的唯一依據。
+  // 沒帶的話 thread 會安靜到套用完成；帶錯的話 Slack 那條路會收到兩則。
+  assert.strictEqual(sent[0].body.client_payload.source, 'checklist');
+  assert.ok(Object.keys(sent[0].body.client_payload).length <= 10, 'client_payload top-level 上限 10 個');
+  ok('帶上 source: checklist（workflow 據此補發「收到了」回執）');
+
+  assert.strictEqual(sent[0].body.client_payload.user, 'po@104.com.tw');
+  assert.strictEqual(cache.get(_answerKey_('VIPOP-46703','Q-001')), 'po@104.com.tw');
+  ok('作答者取 Google 帳號 email，原樣寫入（answered_by 兩種格式都收）');
+
+  // AI 假設的 A-00X **不可**被當成題號寫進去重鍵，否則那些鍵永遠不會被清掉
+  assert.strictEqual(cache.get(_answerKey_('VIPOP-46703','A-001')), null);
+  ok('AI 假設區的 A-001 不會被誤認成題號');
+
+  // ── 第二個視窗送出同一份 ──────────────────────────────────────────
+  sent.length = 0;
+  r = submitChecklistAnswers(ARGS);
+  assert.strictEqual(r.ok, true);
+  assert.strictEqual(r.applied, 0);
+  assert.strictEqual(sent.length, 0, '重送不該再 dispatch（會砍掉正在跑的 agent）');
+  ok('另一個視窗／重新整理後再送 → 去重快取擋下，不重複 dispatch');
+
+  // ── 兩個視窗「同時」送出：靠 LockService，不是靠快取 ────────────────
+  cache.remove(_answerKey_('VIPOP-46703','Q-001'));
+  cache.remove(_answerKey_('VIPOP-46703','Q-002'));
+  sent.length = 0;
+  lockHeld = true;
+  r = submitChecklistAnswers(ARGS);
+  assert.strictEqual(r.ok, false);
+  assert.ok(r.error.indexOf('稍候') >= 0);
+  assert.strictEqual(sent.length, 0, '搶不到鎖時絕不可 dispatch');
+  ok('兩個視窗同一瞬間送出 → 後到的被 script lock 擋下（快取擋不住這一瞬間）');
+  lockHeld = false;
+
+  // ── 格式防線 ────────────────────────────────────────────────────
+  assert.ok(submitChecklistAnswers({ jira_id:'bad', pipeline:'ra-pipeline', answer_batch:PASTE }).error);
+  assert.ok(submitChecklistAnswers({ jira_id:'VIPOP-46703', pipeline:'nope', answer_batch:PASTE }).error);
+  assert.ok(submitChecklistAnswers({ jira_id:'VIPOP-46703', pipeline:'ra-pipeline', answer_batch:'   ' }).error);
+  assert.ok(submitChecklistAnswers({ jira_id:'VIPOP-46703', pipeline:'ra-pipeline', answer_batch:'完全沒有題號' }).error);
+  ok('單號／pipeline／空內容／撈不到題號 → 當場擋下，不送出去讓 Actions 打回來');
+
+  // ── GitHub 回非 204：快取要收回，讓人能重試 ────────────────────────
+  cache.remove(_answerKey_('VIPOP-46703','Q-001'));
+  cache.remove(_answerKey_('VIPOP-46703','Q-002'));
+  sent.length = 0;
+  httpCode = 401;
+  r = submitChecklistAnswers(ARGS);
+  assert.strictEqual(r.ok, false);
+  assert.strictEqual(cache.get(_answerKey_('VIPOP-46703','Q-001')), null, 'dispatch 失敗必須把快取收回');
+  httpCode = 204;
+  r = submitChecklistAnswers(ARGS);
+  assert.strictEqual(r.ok, true, '收回之後要能重試成功');
+  ok('dispatch 失敗 → 收回去重快取，PO 重按一次就能送出');
+
+  // ── 沒有 GITHUB_TOKEN ──────────────────────────────────────────
+  cache.remove(_answerKey_('VIPOP-46703','Q-001'));
+  cache.remove(_answerKey_('VIPOP-46703','Q-002'));
+  PropertiesService.getScriptProperties().deleteProperty('GITHUB_TOKEN');
+  r = submitChecklistAnswers(ARGS);
+  assert.strictEqual(r.ok, false);
+  assert.strictEqual(cache.get(_answerKey_('VIPOP-46703','Q-001')), null);
+  ok('沒設 GITHUB_TOKEN → 明確失敗並收回快取，不會假裝送出去了');
   `);
 }
 
