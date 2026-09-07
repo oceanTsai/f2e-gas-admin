@@ -112,10 +112,14 @@ console.log('[0] GAS 全域 scope — 專案內所有檔案能否共存');
     'MEMORY_CHANNEL',     // 記憶決策卡片要貼到哪個頻道——每日 cron 沒有
                           // conversation 錨點（沒有任何人發過訊息），所以
                           // 必須有一個設定好的固定頻道。見 messageDispatch/core/memory.js
-    'GEMINI_API_KEY',     // Gemini flash-lite 免費 key，只給影子分類用（不接執行）。
-                          // 見 core/classifiers/geminiShadow.js 檔頭的資料保留政策說明
-    'gemini_shadow_log'   // Gemini 影子分類的滾動記錄，見 core/intent.js 的 runGeminiShadow_
-                          // （每分鐘呼叫計數器 gemini_shadow_rate 是 CacheService key，
+    'SHADOW_LLM',         // openai / gemini——影子分類打哪一家，見 core/llm/index.js
+    'OPENAI_API_KEY',     // 兩支 LLM provider 的金鑰。只給影子分類用（不接執行），
+    'GEMINI_API_KEY',     // 沒設就是「這個 provider 關閉」，不會有第二個開關。
+                          // 見 core/classifiers/shadowIntent.js 檔頭的資料外流說明
+    'llm_shadow_log'      // 影子分類的滾動記錄。鍵名**不含 provider 名稱**是刻意的：
+                          // 換一家模型不該換一個鍵，否則比較兩家就要分兩次撈。
+                          // 見 core/intent.js 的 SHADOW_LOG_KEY
+                          // （每分鐘呼叫計數器 llm_shadow_rate 是 CacheService key，
                           // 不是 ScriptProperties，不用列在這份白名單）
   ];
   const badProps = [];
@@ -596,7 +600,7 @@ console.log('\n[2] slackBotProxy — 意圖識別規則');
   assert.strictEqual(getClassifier().name, 'rules');
   PropertiesService.getScriptProperties().setProperty('INTENT_CLASSIFIER', 'llm');
   assert.throws(() => getClassifier(), /尚未實作/);
-  PropertiesService.getScriptProperties().setProperty('INTENT_CLASSIFIER', 'gemini');
+  PropertiesService.getScriptProperties().setProperty('INTENT_CLASSIFIER', 'bogus');
   assert.throws(() => getClassifier(), /未知的 INTENT_CLASSIFIER/);
   PropertiesService.getScriptProperties().deleteProperty('INTENT_CLASSIFIER');
   ok('分類器工廠：預設 rules，未實作／未知一律拋錯（設定錯誤要當場知道）');
@@ -2789,200 +2793,307 @@ console.log('\n[12] slackBotProxy — 程式碼脫敏（_redactCode_）');
 
 
 // ══════════════════════════════════════════════════════════════════
-console.log('\n[13] slackBotProxy — Gemini 影子分類（classifyWithGeminiShadow）');
+console.log('\n[13] slackBotProxy — 意圖影子分類（classifyIntentShadow ＋ core/llm）');
 // ══════════════════════════════════════════════════════════════════
 {
-  // ① 沒有 GEMINI_API_KEY → 功能關閉，完全不打 API
+  // 分類器本身 provider 中立，所以測試也照這條界線切：
+  //   ① ~ ② 與 provider 無關的前置（沒金鑰／空字串一律不打 API）
+  //   ③      兩家 provider 各自的 wire format（端點、payload、金鑰放哪）
+  //   ④ ~ ⑤ 分類邊的契約（回傳形狀、錯誤一律不往上傳假分類）
+  //   ⑥      工廠選 provider
+  const SHADOW_SRC = [
+    'slackBotProxy/core/text.js',
+    'slackBotProxy/core/llm/openai.js',
+    'slackBotProxy/core/llm/gemini.js',
+    'slackBotProxy/core/llm/index.js',
+    'slackBotProxy/core/classifiers/shadowIntent.js'
+  ];
+
+  // 兩家 provider 的 mock 回應信封。分類器只認 text 裡那份 JSON，
+  // 挖出 text 的路徑是 provider 的事——這張表就是那個差異的全部。
+  const ENVELOPE = {
+    openai: (payload) => JSON.stringify({ choices: [{ message: { content: payload } }] }),
+    gemini: (payload) => JSON.stringify({ candidates: [{ content: { parts: [{ text: payload }] } }] })
+  };
+
+  // ① 當前 provider 沒設金鑰 → 功能關閉，完全不打 API
+  //    （另一家設了也不算——影子分類只看 SHADOW_LLM 指到的那一家）
   {
-    const env = mkEnv({});
+    const env = mkEnv({ SHADOW_LLM: 'openai', GEMINI_API_KEY: 'other-key' });
     Object.assign(global, env.globals);
     let calls = 0;
     global.UrlFetchApp = { fetch: () => { calls++; throw new Error('不該打 API'); } };
 
-    eval(src(['slackBotProxy/core/text.js', 'slackBotProxy/core/classifiers/geminiShadow.js']) + `
-    const r = classifyWithGeminiShadow('幫我查 VIPOP-123 進度', 'VIPOP-123');
-    assert.deepStrictEqual(r, { error: 'no-key' });
+    eval(src(SHADOW_SRC) + `
+    const r = classifyIntentShadow('幫我查 VIPOP-123 進度', 'VIPOP-123');
+    assert.deepStrictEqual(r, { error: 'no-key', provider: 'openai', model: 'gpt-4.1-mini' });
     `);
     assert.strictEqual(calls, 0, '沒有金鑰時 UrlFetchApp.fetch 不該被呼叫');
-    ok('沒有 GEMINI_API_KEY → { error: "no-key" }，且完全不打 API');
+    ok('當前 provider 沒金鑰 → { error: "no-key" }，完全不打 API（別家的金鑰不頂用）');
   }
 
   // ② 空字串輸入 → 不打 API
   {
-    const env = mkEnv({ GEMINI_API_KEY: 'test-key' });
+    const env = mkEnv({ OPENAI_API_KEY: 'test-key' });
     Object.assign(global, env.globals);
     let calls = 0;
     global.UrlFetchApp = { fetch: () => { calls++; throw new Error('不該打 API'); } };
 
-    eval(src(['slackBotProxy/core/text.js', 'slackBotProxy/core/classifiers/geminiShadow.js']) + `
-    const r = classifyWithGeminiShadow('', '');
-    assert.deepStrictEqual(r, { error: 'empty' });
+    eval(src(SHADOW_SRC) + `
+    const r = classifyIntentShadow('', '');
+    assert.deepStrictEqual(r, { error: 'empty', provider: 'openai', model: 'gpt-4.1-mini' });
     `);
     assert.strictEqual(calls, 0, '空字串時 UrlFetchApp.fetch 不該被呼叫');
     ok('空字串輸入 → { error: "empty" }，且完全不打 API');
   }
 
-  // ③ 送出去的 prompt 裡不能出現原始程式碼——脫敏有沒有真的接上的迴歸測試
+  // ③ 各家的 wire format ＋ 送出去的 prompt 裡不能有原始程式碼
+  //    （脫敏在分類器那層，所以**每一家**都該吃到——這是「換 provider 不會
+  //      悄悄少脫敏一層」的迴歸測試）
   {
-    const env = mkEnv({ GEMINI_API_KEY: 'test-key' });
-    Object.assign(global, env.globals);
-    let sentText = '';
-    let sentUrl = '';
-    global.UrlFetchApp = { fetch: (url, opt) => {
-      sentUrl = url;
-      sentText = JSON.parse(opt.payload).contents[0].parts[0].text;
-      return {
-        getResponseCode: () => 200,
-        getContentText: () => JSON.stringify({ candidates: [{ content: { parts: [
-          { text: JSON.stringify({ category: 'ASK', reason: '在問程式碼' }) }
-        ] } }] })
-      };
-    }};
+    const WIRE = [
+      { llm: 'openai', keyProp: 'OPENAI_API_KEY', model: 'gpt-4.1-mini',
+        url: 'https://api.openai.com/v1/chat/completions',
+        prompt: (opt) => JSON.parse(opt.payload).messages[0].content,
+        modelSent: (opt) => JSON.parse(opt.payload).model,
+        keyInHeader: true },
+      { llm: 'gemini', keyProp: 'GEMINI_API_KEY', model: 'gemini-flash-lite-latest',
+        url: 'https://generativelanguage.googleapis.com/v1beta/models/gemini-flash-lite-latest:generateContent?key=test-key',
+        prompt: (opt) => JSON.parse(opt.payload).contents[0].parts[0].text,
+        modelSent: () => 'gemini-flash-lite-latest',   // Gemini 的模型名在 URL 裡，不在 payload
+        keyInHeader: false }
+    ];
 
-    eval(src(['slackBotProxy/core/text.js', 'slackBotProxy/core/classifiers/geminiShadow.js']) + `
-    classifyWithGeminiShadow('幫我查這段程式碼 const a = () => { x... }', '');
-    `);
-    assert.ok(sentText.indexOf('const a') < 0, 'prompt 裡不該出現原始程式碼：' + sentText);
-    assert.ok(sentText.indexOf('<code>') >= 0, 'prompt 裡應該看得到脫敏後的 <code>：' + sentText);
-    assert.ok(sentUrl.indexOf('gemini-flash-lite') >= 0, '應該打 flash-lite 模型：' + sentUrl);
-    assert.ok(sentUrl.indexOf('key=test-key') >= 0, '金鑰應該當 query string 帶上：' + sentUrl);
-    ok('打 API 前一定先脫敏，且打的是 flash-lite 端點');
+    WIRE.forEach(function (w) {
+      const seed = { SHADOW_LLM: w.llm };
+      seed[w.keyProp] = 'test-key';
+      const env = mkEnv(seed);
+      Object.assign(global, env.globals);
+
+      let sent = null;
+      global.UrlFetchApp = { fetch: (url, opt) => {
+        sent = { url, opt };
+        return {
+          getResponseCode: () => 200,
+          getContentText: () => ENVELOPE[w.llm](JSON.stringify({ category: 'ASK', reason: '在問程式碼' }))
+        };
+      }};
+
+      eval(src(SHADOW_SRC) + `
+      const r = classifyIntentShadow('幫我查這段程式碼 const a = () => { x... }', '');
+      assert.strictEqual(r.category, 'ASK', ${JSON.stringify(w.llm)});
+      assert.strictEqual(r.provider, ${JSON.stringify(w.llm)});
+      assert.strictEqual(r.model, ${JSON.stringify(w.model)});
+      `);
+
+      const prompt = w.prompt(sent.opt);
+      assert.ok(prompt.indexOf('const a') < 0, w.llm + ' 的 prompt 裡不該出現原始程式碼：' + prompt);
+      assert.ok(prompt.indexOf('<code>') >= 0, w.llm + ' 的 prompt 裡應該看得到脫敏後的 <code>');
+      assert.strictEqual(sent.url, w.url, w.llm + ' 端點：' + sent.url);
+      assert.strictEqual(w.modelSent(sent.opt), w.model, w.llm + ' 模型名');
+
+      const auth = (sent.opt.headers || {}).Authorization || '';
+      if (w.keyInHeader) {
+        assert.strictEqual(auth, 'Bearer test-key', 'OpenAI 的金鑰要走 Authorization header');
+        assert.ok(sent.url.indexOf('test-key') < 0, '金鑰不該出現在 URL 裡（會被記進執行記錄）');
+      } else {
+        // Gemini 的 REST 介面只吃 query string 帶 key——這是已知代價，不是疏漏，
+        // 所以斷言反過來釘住它：之後有人「順手」想改成 header 會在這裡看到理由。
+        assert.strictEqual(auth, '', 'Gemini 沒有 Authorization header');
+        assert.ok(sent.url.indexOf('key=test-key') >= 0, 'Gemini 的金鑰只能走 query string');
+      }
+    });
+    ok('openai／gemini：端點、payload、金鑰位置各自正確，且**都**先脫敏才送出');
   }
 
-  // ④ 正常回應 → 分類結果原樣回傳
+  // ④ 正常回應 → 分類結果連同 provider／model 一起回傳
   {
-    const env = mkEnv({ GEMINI_API_KEY: 'test-key' });
+    const env = mkEnv({ SHADOW_LLM: 'gemini', GEMINI_API_KEY: 'test-key' });
     Object.assign(global, env.globals);
     global.UrlFetchApp = { fetch: () => ({
       getResponseCode: () => 200,
-      getContentText: () => JSON.stringify({ candidates: [{ content: { parts: [
-        { text: JSON.stringify({ category: 'RA', reason: '要求寫規格書' }) }
-      ] } }] })
+      getContentText: () => ENVELOPE.gemini(JSON.stringify({ category: 'RA', reason: '要求寫規格書' }))
     })};
 
-    eval(src(['slackBotProxy/core/text.js', 'slackBotProxy/core/classifiers/geminiShadow.js']) + `
-    const r = classifyWithGeminiShadow('幫 VIPOP-123 寫規格書', 'VIPOP-123');
-    assert.deepStrictEqual(r, { category: 'RA', reason: '要求寫規格書', sanitized: '幫 VIPOP-123 寫規格書' });
+    eval(src(SHADOW_SRC) + `
+    const r = classifyIntentShadow('幫 VIPOP-123 寫規格書', 'VIPOP-123');
+    assert.deepStrictEqual(r, {
+      category: 'RA', reason: '要求寫規格書', sanitized: '幫 VIPOP-123 寫規格書',
+      provider: 'gemini', model: 'gemini-flash-lite-latest'
+    });
     `);
-    ok('mock 正常回應 → 分類結果原樣回傳');
+    ok('mock 正常回應 → 分類結果原樣回傳，並帶上是哪家哪個模型答的');
   }
 
-  // ⑤ 非 200／壞 JSON／模型亂編分類 → 一律回 error，不會把亂編的分類往上傳
+  // ⑤ 非 200／壞信封／模型吐非 JSON／亂編分類 → 一律回 error，不往上傳假分類
   {
     const cases = [
       { name: '非 200', fetch: () => ({ getResponseCode: () => 429, getContentText: () => '' }),
-        expect: { error: 'http-429', sanitized: '隨便一句話' } },
-      { name: '壞 JSON', fetch: () => ({ getResponseCode: () => 200, getContentText: () => 'not json' }),
-        expect: { error: 'bad-json', sanitized: '隨便一句話' } },
-      { name: '亂編分類', fetch: () => ({
-          getResponseCode: () => 200,
-          getContentText: () => JSON.stringify({ candidates: [{ content: { parts: [
-            { text: JSON.stringify({ category: 'DELETE_EVERYTHING' }) }
-          ] } }] })
-        }), expect: { error: 'bad-category', sanitized: '隨便一句話' } }
+        err: 'http-429' },
+      // 信封壞掉（provider 挖不出 text）與模型吐的內容壞掉（挖出來了但不是 JSON）
+      // 刻意分成兩種 error：前者是 provider／API 變了，後者是模型不聽話，
+      // 兩件事的下一步完全不同。
+      { name: '壞信封', fetch: () => ({ getResponseCode: () => 200, getContentText: () => 'not json' }),
+        err: 'bad-envelope' },
+      { name: '模型吐非 JSON', fetch: () => ({ getResponseCode: () => 200,
+          getContentText: () => ENVELOPE.openai('我覺得是 RA 啦') }), err: 'bad-json' },
+      { name: '亂編分類', fetch: () => ({ getResponseCode: () => 200,
+          getContentText: () => ENVELOPE.openai(JSON.stringify({ category: 'DELETE_EVERYTHING' })) }),
+        err: 'bad-category' }
     ];
 
     cases.forEach(function (c) {
-      const env = mkEnv({ GEMINI_API_KEY: 'test-key' });
+      const env = mkEnv({ OPENAI_API_KEY: 'test-key' });
       Object.assign(global, env.globals);
       global.UrlFetchApp = { fetch: c.fetch };
 
-      eval(src(['slackBotProxy/core/text.js', 'slackBotProxy/core/classifiers/geminiShadow.js']) + `
-      const r = classifyWithGeminiShadow('隨便一句話', '');
-      assert.deepStrictEqual(r, ${JSON.stringify(c.expect)}, ${JSON.stringify(c.name)});
+      eval(src(SHADOW_SRC) + `
+      const r = classifyIntentShadow('隨便一句話', '');
+      assert.deepStrictEqual(r, {
+        error: ${JSON.stringify(c.err)}, sanitized: '隨便一句話',
+        provider: 'openai', model: 'gpt-4.1-mini'
+      }, ${JSON.stringify(c.name)});
       `);
     });
-    ok('非 200／壞 JSON／模型亂編分類 → 一律回 error，不往上傳假分類');
+    ok('非 200／壞信封／模型吐非 JSON／亂編分類 → 各自的 error，都不往上傳假分類');
+  }
+
+  // ⑥ 工廠：未知的 SHADOW_LLM 要明確拋錯，不能靜默退回預設那家。
+  //    靜默降級的症狀是「你以為在比 B，其實一直是 A 在答」——而 log 不會幫你
+  //    抓到，它記的 p=openai 是對的，錯的是你的預期。
+  {
+    const env = mkEnv({ SHADOW_LLM: 'claude' });
+    Object.assign(global, env.globals);
+    eval(src(SHADOW_SRC) + `
+    assert.throws(() => getShadowLlm(), /未知的 SHADOW_LLM/);
+    `);
+
+    const env2 = mkEnv({});
+    Object.assign(global, env2.globals);
+    eval(src(SHADOW_SRC) + `
+    assert.strictEqual(getShadowLlm().name, 'openai', '沒設 SHADOW_LLM → 預設 openai');
+    `);
+    ok('SHADOW_LLM：預設 openai，未知的一律拋錯（設定錯誤要當場知道）');
   }
 }
 
 
 // ══════════════════════════════════════════════════════════════════
-console.log('\n[14] slackBotProxy — Gemini 影子分類的掛載（runGeminiShadow_）');
+console.log('\n[14] slackBotProxy — 影子分類的掛載（runShadowIntent_）');
 // ══════════════════════════════════════════════════════════════════
 {
   const SHADOW_SRC = [
     'slackBotProxy/core/text.js',
     'slackBotProxy/core/conv.js',
     'slackBotProxy/core/decision.js',
-    'slackBotProxy/core/classifiers/geminiShadow.js',
+    'slackBotProxy/core/llm/openai.js',
+    'slackBotProxy/core/llm/gemini.js',
+    'slackBotProxy/core/llm/index.js',
+    'slackBotProxy/core/classifiers/shadowIntent.js',
     'slackBotProxy/core/intent.js'
   ];
+  const OPENAI_OK = (payload) => JSON.stringify({ choices: [{ message: { content: payload } }] });
+  const GEMINI_OK = (payload) => JSON.stringify({ candidates: [{ content: { parts: [{ text: payload }] } }] });
 
-  // ① 成功分類 → 回覆貼在原串下面，記錄寫進 gemini_shadow_log
+  // ① 成功分類 → 回覆貼在原串下面，記錄寫進 llm_shadow_log
   {
-    const env = mkEnv({ GEMINI_API_KEY: 'test-key' });
+    const env = mkEnv({ OPENAI_API_KEY: 'test-key' });
     Object.assign(global, env.globals);
     global.UrlFetchApp = { fetch: () => ({
       getResponseCode: () => 200,
-      getContentText: () => JSON.stringify({ candidates: [{ content: { parts: [
-        { text: JSON.stringify({ category: 'RA', reason: '要求寫規格書' }) }
-      ] } }] })
+      getContentText: () => OPENAI_OK(JSON.stringify({ category: 'RA', reason: '要求寫規格書' }))
     })};
     const posted = [];
     const provider = { postMessage: (ch, text, thread) => posted.push({ ch, text, thread }) };
 
     eval(src(SHADOW_SRC) + `
-    runGeminiShadow_('幫 VIPOP-123 寫規格書', { channel: 'C1', thread: null, replyTo: '1.1' }, 'U1', provider, 'ra');
+    runShadowIntent_('幫 VIPOP-123 寫規格書', { channel: 'C1', thread: null, replyTo: '1.1' }, 'U1', provider, 'ra');
     `);
 
     assert.strictEqual(posted.length, 1, '應該回覆一則觀察訊息');
-    assert.ok(posted[0].text.indexOf('Gemini 意圖分析判定為：RA') >= 0, posted[0].text);
+    // 印模型名而不是 provider 名：同一家換了模型版本，判斷品質就是另一回事
+    assert.ok(posted[0].text.indexOf('gpt-4.1-mini 意圖分析判定為：RA') >= 0, posted[0].text);
     assert.ok(posted[0].text.indexOf('脫敏後送出：幫 VIPOP-123 寫規格書') >= 0, posted[0].text);
 
-    const log = JSON.parse(env.props.get('gemini_shadow_log'));
+    const log = JSON.parse(env.props.get('llm_shadow_log'));
     assert.strictEqual(log.length, 1);
     assert.strictEqual(log[0].cmd, 'ra');
     assert.strictEqual(log[0].cat, 'RA');
+    assert.strictEqual(log[0].p, 'openai');
+    assert.strictEqual(log[0].m, 'gpt-4.1-mini');
     assert.strictEqual(log[0].s, '幫 VIPOP-123 寫規格書');
-    ok('已知指令（ra）＋ 合法分類 → 回覆連同脫敏後的文字一起貼出，記錄含 knownCmd 與分類結果');
+    ok('已知指令（ra）＋ 合法分類 → 回覆印模型名與脫敏後文字，記錄含 knownCmd／provider／model');
   }
 
-  // ①b 貼了真的程式碼時，回覆與記錄裡看到的都是脫敏後的版本，不是原始程式碼
+  // ①b 換一家 provider → **同一份** log 繼續累加，靠 p/m 分辨誰答的。
+  //     這是「log 鍵名不綁 provider」的重點：兩家的判斷躺在同一個時間軸上，
+  //     撈一次就能比。
   {
-    const env = mkEnv({ GEMINI_API_KEY: 'test-key' });
+    const env = mkEnv({ OPENAI_API_KEY: 'k1', GEMINI_API_KEY: 'k2' });
+    Object.assign(global, env.globals);
+    const provider = { postMessage: () => {} };
+
+    global.UrlFetchApp = { fetch: () => ({
+      getResponseCode: () => 200,
+      getContentText: () => OPENAI_OK(JSON.stringify({ category: 'RA' }))
+    })};
+    eval(src(SHADOW_SRC) + `
+    runShadowIntent_('幫 VIPOP-123 寫規格書', { channel: 'C1' }, 'U1', provider, 'ra');
+    `);
+
+    env.props.set('SHADOW_LLM', 'gemini');
+    global.UrlFetchApp = { fetch: () => ({
+      getResponseCode: () => 200,
+      getContentText: () => GEMINI_OK(JSON.stringify({ category: 'SA' }))
+    })};
+    eval(src(SHADOW_SRC) + `
+    runShadowIntent_('幫 VIPOP-123 寫規格書', { channel: 'C1' }, 'U1', provider, 'ra');
+    `);
+
+    const log = JSON.parse(env.props.get('llm_shadow_log'));
+    assert.strictEqual(log.length, 2, '換 provider 不該換一份 log');
+    assert.deepStrictEqual(log.map(e => [e.p, e.cat]), [['openai', 'RA'], ['gemini', 'SA']]);
+    ok('換 provider → 同一份 llm_shadow_log 繼續累加，p/m 分辨得出誰答的（撈一次就能比）');
+  }
+
+  // ①c 貼了真的程式碼時，回覆與記錄裡看到的都是脫敏後的版本，不是原始程式碼
+  {
+    const env = mkEnv({ OPENAI_API_KEY: 'test-key' });
     Object.assign(global, env.globals);
     global.UrlFetchApp = { fetch: () => ({
       getResponseCode: () => 200,
-      getContentText: () => JSON.stringify({ candidates: [{ content: { parts: [
-        { text: JSON.stringify({ category: 'ASK', reason: '在問一段程式碼' }) }
-      ] } }] })
+      getContentText: () => OPENAI_OK(JSON.stringify({ category: 'ASK', reason: '在問一段程式碼' }))
     })};
     const posted = [];
     const provider = { postMessage: (ch, text, thread) => posted.push({ ch, text, thread }) };
 
     eval(src(SHADOW_SRC) + `
-    runGeminiShadow_('幫我查這段程式碼 const a = () => { x... }', { channel: 'C1' }, 'U1', provider, 'ask');
+    runShadowIntent_('幫我查這段程式碼 const a = () => { x... }', { channel: 'C1' }, 'U1', provider, 'ask');
     `);
 
     assert.ok(posted[0].text.indexOf('const a') < 0, '回覆裡不該出現原始程式碼：' + posted[0].text);
     assert.ok(posted[0].text.indexOf('脫敏後送出：幫我查這段程式碼 <code>') >= 0, posted[0].text);
 
-    const log = JSON.parse(env.props.get('gemini_shadow_log'));
+    const log = JSON.parse(env.props.get('llm_shadow_log'));
     assert.strictEqual(log[0].s, '幫我查這段程式碼 <code>', '記錄裡也不該留原始程式碼');
     ok('貼真的程式碼時，回覆與記錄看到的都是脫敏後版本，原始程式碼不會外流到 Slack 或 log');
   }
 
   // ② 60 秒內超過每分鐘上限 → 直接跳過，不打 API、不回覆
   {
-    const env = mkEnv({ GEMINI_API_KEY: 'test-key' });
+    const env = mkEnv({ OPENAI_API_KEY: 'test-key' });
     Object.assign(global, env.globals);
     let calls = 0;
     global.UrlFetchApp = { fetch: () => {
       calls++;
-      return {
-        getResponseCode: () => 200,
-        getContentText: () => JSON.stringify({ candidates: [{ content: { parts: [
-          { text: JSON.stringify({ category: 'ASK' }) }
-        ] } }] })
-      };
+      return { getResponseCode: () => 200, getContentText: () => OPENAI_OK(JSON.stringify({ category: 'ASK' })) };
     }};
     const posted = [];
     const provider = { postMessage: (ch, text, thread) => posted.push({ ch, text, thread }) };
 
     eval(src(SHADOW_SRC) + `
     for (let i = 0; i < 11; i++) {
-      runGeminiShadow_('第 ' + i + ' 句', { channel: 'C1' }, 'U1', provider, '(intent)');
+      runShadowIntent_('第 ' + i + ' 句', { channel: 'C1' }, 'U1', provider, '(intent)');
     }
     `);
 
@@ -2991,25 +3102,26 @@ console.log('\n[14] slackBotProxy — Gemini 影子分類的掛載（runGeminiSh
     ok('每分鐘上限擋下超量呼叫，不多打 API 也不多回覆');
   }
 
-  // ③ Gemini 回錯誤 → 不回覆任何訊息，但記錄裡看得到這筆失敗
+  // ③ 模型回錯誤 → 不回覆任何訊息，但記錄裡看得到這筆失敗
   {
-    const env = mkEnv({ GEMINI_API_KEY: 'test-key' });
+    const env = mkEnv({ OPENAI_API_KEY: 'test-key' });
     Object.assign(global, env.globals);
     global.UrlFetchApp = { fetch: () => ({ getResponseCode: () => 500, getContentText: () => '' }) };
     const posted = [];
     const provider = { postMessage: (ch, text, thread) => posted.push({ ch, text, thread }) };
 
     eval(src(SHADOW_SRC) + `
-    runGeminiShadow_('這句會失敗', { channel: 'C1' }, 'U1', provider, '(intent)');
+    runShadowIntent_('這句會失敗', { channel: 'C1' }, 'U1', provider, '(intent)');
     `);
 
-    assert.strictEqual(posted.length, 0, 'Gemini 失敗時不該回覆任何訊息（見「已知的架構代價」第 3 點）');
-    const log = JSON.parse(env.props.get('gemini_shadow_log'));
+    assert.strictEqual(posted.length, 0, '模型失敗時不該回覆任何訊息（見「已知的架構代價」第 3 點）');
+    const log = JSON.parse(env.props.get('llm_shadow_log'));
     assert.strictEqual(log[0].err, 'http-500');
-    ok('Gemini 回錯誤 → 靜默（不回覆），但記錄裡留得下這筆失敗方便事後查');
+    assert.strictEqual(log[0].p, 'openai', '失敗的那筆也要記得是哪家掛的');
+    ok('模型回錯誤 → 靜默（不回覆），但記錄裡留得下這筆失敗與是哪家掛的');
   }
 
-  // ④ 沒有 GEMINI_API_KEY → 完全不影響（不回覆、不丟例外），這是最重要的回歸保證：
+  // ④ 當前 provider 沒金鑰 → 完全不影響（不回覆、不丟例外），這是最重要的回歸保證：
   //    這支旁支功能關掉時，一行都不能動到既有行為。
   {
     const env = mkEnv({});
@@ -3019,11 +3131,11 @@ console.log('\n[14] slackBotProxy — Gemini 影子分類的掛載（runGeminiSh
     const provider = { postMessage: (ch, text, thread) => posted.push({ ch, text, thread }) };
 
     eval(src(SHADOW_SRC) + `
-    runGeminiShadow_('隨便一句話', { channel: 'C1' }, 'U1', provider, 'ra');
+    runShadowIntent_('隨便一句話', { channel: 'C1' }, 'U1', provider, 'ra');
     `);
 
     assert.strictEqual(posted.length, 0, '沒有金鑰時不該有任何觀察訊息');
-    ok('沒有 GEMINI_API_KEY → 完全靜默，不影響任何既有行為');
+    ok('當前 provider 沒金鑰 → 完全靜默，不影響任何既有行為');
   }
 }
 

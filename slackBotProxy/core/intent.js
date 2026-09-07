@@ -317,80 +317,94 @@ function clearIntentMisses() {
 
 
 // ═══════════════════════════════════════════════════════════════════
-//  Gemini 影子分類——只記錄、只回報，不接執行
+//  意圖影子分類——只記錄、只回報，不接執行
 //
 //  掛在 slackBotProxy.js 的 _routeMentionEvent_ 最尾端（switch 執行完之後）：
-//  不管這句話最後是哪個已知指令、還是走了 routeByIntent，都額外跑一次 Gemini
-//  flash-lite 分類，貼出來給人肉眼核對「Gemini 猜得準不準」。
+//  不管這句話最後是哪個已知指令、還是走了 routeByIntent，都額外跑一次 LLM
+//  分類，貼出來給人肉眼核對「模型猜得準不準」。打哪一家由 SHADOW_LLM 決定，
+//  見 core/llm/index.js。
 //
 //  ⚠️ 從頭到尾**只讀不寫**：不會影響 knownCmd／routeByIntent 已經做的任何決定，
 //     這裡拿到的 result 只拿去記錄與回覆，不會被拿去 dispatch 任何 pipeline。
 //     真的要把 LLM 接進生產路由是另一個決定（core/classifiers/llm.js，尚未做）。
 //
 //  ⚠️ 整支包在 try/catch：這是掛在**所有** @Alice 訊息尾端的旁支功能，
-//     Gemini 配額用完、UrlFetchApp 逾時、JSON 格式跑掉都不能讓主流程（已經
+//     模型配額用完、UrlFetchApp 逾時、JSON 格式跑掉都不能讓主流程（已經
 //     執行完的 ra/sa/ask/…）看起來像失敗了。
 // ═══════════════════════════════════════════════════════════════════
 
-const GEMINI_SHADOW_LOG_KEY = 'gemini_shadow_log';
-const GEMINI_SHADOW_LOG_MAX = 60;     // 同 INTENT_MISS_MAX 的理由：ScriptProperties 單筆 9KB 上限
+// ⚠️ 鍵名刻意**不含 provider 名稱**：換一家模型不該換一個鍵。否則每換一次就
+//    多一份記錄，而「比較 A 跟 B 誰準」變成要分兩次撈、自己對時間軸拼起來——
+//    那份工只要煩一次，就不會有人真的去比。哪一家答的記在每筆的 p/m 欄位裡。
+const SHADOW_LOG_KEY = 'llm_shadow_log';
+const SHADOW_LOG_MAX = 60;      // 同 INTENT_MISS_MAX 的理由：ScriptProperties 單筆 9KB 上限
 
-// 每分鐘上限，抓保守值——免費配額被一波洗版式的訊息燒光，比少幾筆觀察資料更糟。
-const GEMINI_SHADOW_RATE_KEY = 'gemini_shadow_rate';
-const GEMINI_SHADOW_RATE_LIMIT = 10;
+// 每分鐘上限，抓保守值——帳單（或免費配額）被一波洗版式的訊息燒掉，比少幾筆
+// 觀察資料更糟。同樣不綁 provider 名稱：節流的理由跟打哪一家無關。
+const SHADOW_RATE_KEY = 'llm_shadow_rate';
+const SHADOW_RATE_LIMIT = 10;
 
-function runGeminiShadow_(text, conv, userId, provider, knownCmd) {
+function runShadowIntent_(text, conv, userId, provider, knownCmd) {
   try {
-    if (!_geminiShadowRateOk_()) return;   // 超過上限就整段跳過，不記錄、不報錯
+    if (!_shadowRateOk_()) return;   // 超過上限就整段跳過，不記錄、不報錯
 
     const raw = _toHalfWidth_(text || '').trim();
     const jiraInText = _extractJiraKey_(raw);
-    const result = classifyWithGeminiShadow(raw, jiraInText);
+    const result = classifyIntentShadow(raw, jiraInText);
 
     // 記脫敏後的文字（result.sanitized），不是原句：這份 log 的用途之一就是
     // 核對脫敏有沒有生效，記原句等於自己把要防的東西寫進另一個地方。
     // 'no-key'／'empty' 沒有 sanitized（根本沒跑到脫敏），退回記原句方便追蹤。
-    _recordGeminiShadow_(result.sanitized || raw, conv, knownCmd, result);
+    _recordShadow_(result.sanitized || raw, conv, knownCmd, result);
 
-    // 失敗（沒設金鑰／配額用完／逾時／格式跑掉）一律靜默：這些在免費配額下是
-    // 常態而不是意外，每次都回一則錯誤訊息只會把頻道洗成雜訊。只有成功拿到
+    // 失敗（沒設金鑰／配額用完／逾時／格式跑掉）一律靜默：這些對一個旁支的
+    // 觀察功能是常態而不是意外，每次都回一則錯誤訊息只會把頻道洗成雜訊。只有成功拿到
     // 合法分類才回覆，讓使用者知道這句話「有」被觀察到、觀察的結果是什麼。
     if (result.error) return;
 
     // 附上脫敏後實際送出去的內容，讓人能在 Slack 上直接核對「有沒有真的把
-    // 程式碼擋下來」，不用只靠信任單元測試——這正是免費 key 會被拿去訓練這件事
-    // 最在意的一環。result.sanitized 一定有值（走到這裡代表 API 真的打過了）。
+    // 程式碼擋下來」，不用只靠信任單元測試——這正是把使用者貼的程式碼交給
+    // 外部服務這件事最在意的一環。result.sanitized 一定有值（走到這裡代表
+    // API 真的打過了）。
+    //
+    // 訊息裡要印**模型名**：這則回覆的用途就是給人比較，而「哪個模型判的」
+    // 是比較的前提。印 provider 名（openai/gemini）不夠——同一家換了模型
+    // 版本，判斷品質就是另一回事了。
     provider.postMessage(
       conv.channel,
-      'Gemini 意圖分析判定為：' + result.category +
+      result.model + ' 意圖分析判定為：' + result.category +
         (result.reason ? '（' + result.reason + '）' : '') +
         '\n脫敏後送出：' + result.sanitized,
       _replyTarget_(conv)
     );
   } catch (err) {
-    console.error('Gemini 影子分類整體失敗（不影響主流程）:', err);
+    console.error('意圖影子分類整體失敗（不影響主流程）:', err);
   }
 }
 
-function _geminiShadowRateOk_() {
+function _shadowRateOk_() {
   const cache = CacheService.getScriptCache();
-  const n = parseInt(cache.get(GEMINI_SHADOW_RATE_KEY) || '0', 10);
-  if (n >= GEMINI_SHADOW_RATE_LIMIT) return false;
-  cache.put(GEMINI_SHADOW_RATE_KEY, String(n + 1), 60);
+  const n = parseInt(cache.get(SHADOW_RATE_KEY) || '0', 10);
+  if (n >= SHADOW_RATE_LIMIT) return false;
+  cache.put(SHADOW_RATE_KEY, String(n + 1), 60);
   return true;
 }
 
 // 記 knownCmd 當 ground truth（已知指令本身的名稱；落到 routeByIntent 的自由
-//文字則記 '(intent)'），才能跟 result.category 並排比對「Gemini 猜得準不準」。
+//文字則記 '(intent)'），才能跟 result.category 並排比對「模型猜得準不準」。
 // 刻意不在這裡重新跑一次規則分類器：routeByIntent 執行當下已經算過一次真正的
 // 判斷了，這裡只是要留下「這句話最後被系統怎麼處理」這個粗粒度資訊，重新計算
 // 只是白付一次成本。
-function _recordGeminiShadow_(text, conv, knownCmd, result) {
+//
+// p／m（provider／model）是共用一份 log 的代價，也是它的重點：同一份記錄裡
+// 混著兩家模型的判斷，沒有這兩欄就分不出誰答的。欄名取單字母跟其他欄一致——
+// ScriptProperties 單筆 9KB，60 筆的空間都是這樣省出來的。
+function _recordShadow_(text, conv, knownCmd, result) {
   try {
     const props = PropertiesService.getScriptProperties();
     let list = [];
     try {
-      list = JSON.parse(props.getProperty(GEMINI_SHADOW_LOG_KEY) || '[]');
+      list = JSON.parse(props.getProperty(SHADOW_LOG_KEY) || '[]');
       if (!Array.isArray(list)) list = [];
     } catch (err) {
       list = [];
@@ -398,6 +412,8 @@ function _recordGeminiShadow_(text, conv, knownCmd, result) {
 
     list.push({
       t: new Date().toISOString(),
+      p: result.provider || '',
+      m: result.model || '',
       cmd: knownCmd || '',
       cat: result.category || '',
       err: result.error || '',
@@ -406,33 +422,33 @@ function _recordGeminiShadow_(text, conv, knownCmd, result) {
       th: conv && conv.thread ? '1' : '0'
     });
 
-    if (list.length > GEMINI_SHADOW_LOG_MAX) list = list.slice(-GEMINI_SHADOW_LOG_MAX);
-    props.setProperty(GEMINI_SHADOW_LOG_KEY, JSON.stringify(list));
+    if (list.length > SHADOW_LOG_MAX) list = list.slice(-SHADOW_LOG_MAX);
+    props.setProperty(SHADOW_LOG_KEY, JSON.stringify(list));
   } catch (err) {
-    console.error('記錄 Gemini 影子分類失敗:', err);
+    console.error('記錄意圖影子分類失敗:', err);
   }
 }
 
-/** 在 GAS 編輯器裡手動執行，把累積的 Gemini 影子分類記錄印到執行記錄。 */
-function dumpGeminiShadowLog() {
-  const raw = PropertiesService.getScriptProperties().getProperty(GEMINI_SHADOW_LOG_KEY) || '[]';
+/** 在 GAS 編輯器裡手動執行，把累積的影子分類記錄印到執行記錄。 */
+function dumpShadowLog() {
+  const raw = PropertiesService.getScriptProperties().getProperty(SHADOW_LOG_KEY) || '[]';
   let list = [];
   try { list = JSON.parse(raw); } catch (err) { list = []; }
 
   if (!list.length) {
-    console.log('目前沒有 Gemini 影子分類記錄。');
+    console.log('目前沒有意圖影子分類記錄。');
     return;
   }
 
-  console.log(`Gemini 影子分類記錄共 ${list.length} 筆（新到舊）：`);
+  console.log(`意圖影子分類記錄共 ${list.length} 筆（新到舊）：`);
   list.slice().reverse().forEach(function (m, i) {
     const verdict = m.err ? ('❌ ' + m.err) : ('→ ' + m.cat);
-    console.log(`${i + 1}. [${m.t}] 已知路徑=${m.cmd || '(intent)'}  ${verdict}${m.th === '1' ? ' (in-thread)' : ''}  「${m.s}」`);
+    console.log(`${i + 1}. [${m.t}] ${m.m || m.p || '?'}  已知路徑=${m.cmd || '(intent)'}  ${verdict}${m.th === '1' ? ' (in-thread)' : ''}  「${m.s}」`);
   });
 }
 
 /** 記錄看完之後用這支清掉，重新開始收集。 */
-function clearGeminiShadowLog() {
-  PropertiesService.getScriptProperties().deleteProperty(GEMINI_SHADOW_LOG_KEY);
-  console.log('已清空 Gemini 影子分類記錄。');
+function clearShadowLog() {
+  PropertiesService.getScriptProperties().deleteProperty(SHADOW_LOG_KEY);
+  console.log('已清空意圖影子分類記錄。');
 }

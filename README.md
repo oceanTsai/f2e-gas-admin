@@ -53,6 +53,7 @@ f2e-gas-admin/
 | 專案 | 屬性 | 用途 |
 |---|---|---|
 | `slackBotProxy` | `SLACK_TOKEN` / `GITHUB_TOKEN` / `NOTIFY_KEY` / `CHAT_PROVIDER` | 見 `core/diagnose.js` |
+| `slackBotProxy` | `SHADOW_LLM`（`openai`／`gemini`，預設 `openai`）＋對應的 `OPENAI_API_KEY`／`GEMINI_API_KEY` | 意圖影子分類：只觀察、不接執行。**沒設當前 provider 的金鑰就是關閉**，不會有第二個開關。見 `core/llm/index.js`、`core/classifiers/shadowIntent.js` |
 | `googleDriveHtmlPreviewer` | `GITHUB_TOKEN` | 對 augma 發 `repository_dispatch`（補問清單的「送出答案」） |
 
 > **補問清單的「送出答案」怎麼走**
