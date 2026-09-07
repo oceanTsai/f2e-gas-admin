@@ -79,8 +79,10 @@ function _buildIntentCtx_(text, conv, provider) {
     askThread: !!(route && route.kind === 'ask'),
     // thunk 而不是值：它背後是 fetchProgress（一次網路呼叫）。規則層完全不需要
     // 它，不該為了統一介面就每次都付那個成本。
-    getPending: function () {
-      const jira = (route && route.j) ? route.j : '';
+    // jiraOverride：訊息自帶單號、但 thread 沒有路由時（例如把補問清單貼進頻道
+    // 而不是 thread 裡）由呼叫端指定。不給就用 thread 路由出來的那張。
+    getPending: function (jiraOverride) {
+      const jira = jiraOverride || ((route && route.j) ? route.j : '');
       if (!jira) return [];
       const progress = fetchProgress(jira);
       return ((progress && progress.pending_questions) || []).filter(function (q) {

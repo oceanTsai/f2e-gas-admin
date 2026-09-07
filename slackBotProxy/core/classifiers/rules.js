@@ -153,6 +153,43 @@ const RulesClassifier = {
                    '請貼到對應的 thread，我不替你猜要寫哪一張。'
         });
       }
+      // ── digest 模式：這張單改在補問清單頁面上作答 ───────────────
+      //
+      // 判準是 augma 寫進每一題的 notify_mode（decision-gateway.sh）。digest 表示
+      // 那張卡片沒有按鈕、只給了補問清單的連結，PO 該在頁面上按「送出答案」——
+      // 那條路由 googleDriveHtmlPreviewer 直接對 GitHub 發 repository_dispatch，
+      // 完全不經過本專案。
+      //
+      // 為什麼擋在**分類器**、而不是下游的 answer.js：擋在這裡，這份資料根本
+      // 不會流進作答機制，下游一行都不用改。擋在下游則是「收下了再判斷要不要用」，
+      // 得在只負責分派的那層塞進 digest / checkList 這些領域細節。
+      //
+      // 為什麼要擋：頁面直送與這裡各有一顆去重快取（分屬兩個 Apps Script 專案），
+      // 互相看不見。同一批答案兩邊都送的話，兩個 resume job 併發寫同一份
+      // progress.json，第二次 dispatch 會把正在跑的 agent 砍掉（phase job 是
+      // cancel-in-progress，augma 的 commit-phase.sh:45 記過這個 run）。
+      //
+      // ⚠️ 只擋 digest。card 模式（沒有補問清單可作答的決策——RA Phase 2 的 repo
+      //    勾選題、SA 步驟七、記憶裁決…）的按鈕與文字回覆是它們**唯一**的入口，
+      //    一起擋掉會讓那些流程直接卡死。
+      //
+      // ⚠️ 判準**不可以**改成「artifacts 裡有沒有 checkList.html」。publish-html.sh
+      //    一律先跑（ra-phase4 步驟 4 早於步驟 5），所以 card 模式下 artifacts 裡
+      //    也有它——照那樣判會把手動切 card 的單子一起封掉，而 card 的按鈕本來就
+      //    剝掉了「C. 其他」，等於自由文字作答整個消失。
+      //
+      // getPending() 背後是一次 fetchProgress（不快取）。只在真的貼上補問清單時
+      // 才付這個成本，一般對話與規則 3 的 thread 閒聊完全不會走到這裡。
+      const pending = (typeof ctx.getPending === 'function') ? ctx.getPending(target) : [];
+      const sealed = pending.some(function (q) { return q && q.notify_mode === 'digest'; });
+      if (sealed) {
+        return _intent_({
+          action: 'unknown', jiraId: target, confidence: 'high',
+          matchedBy: 'checklist-paste-sealed',
+          restate: '補問清單請在頁面上按「送出答案」，貼在這裡不會生效。'
+        });
+      }
+
       return _intent_({
         action: 'answer_question',
         jiraId: target,
