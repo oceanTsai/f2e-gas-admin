@@ -182,9 +182,6 @@ function handleAnswerResult(body, key, provider) {
   if (n(s.applied)) {
     lines.push('✅ ' + by + '的批次回覆已寫入 ' + jiraId + '：' + list(s.applied));
   } else if (n(s.recorded_non_blocking)) {
-    // 開場白不可以說「沒有寫入任何一題」——下一行馬上要說「已記錄 N 筆」，
-    // 兩句擺在一起讀起來像答案掉了。這裡的實情是「沒有閘門題被寫入，但答案有留下」，
-    // 那是完全正常的：PO 只答了 🟡 Warning 與 🟢 AI 假設時就是這個形狀。
     lines.push('ℹ️ ' + by + '的回覆沒有涉及待決題（' + jiraId + '），流程不受影響。');
   } else {
     lines.push('ℹ️ ' + by + '貼上的內容沒有寫入任何一題（' + jiraId + '）。');
