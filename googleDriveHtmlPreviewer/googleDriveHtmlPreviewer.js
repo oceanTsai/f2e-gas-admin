@@ -127,6 +127,13 @@ function submitChecklistAnswers(payload) {
     return { ok: false, error: '沒有任何答案內容' };
   }
 
+  // 設定問題要在這裡就分辨出來，不能等到 dispatch 失敗才一起回「請稍後再試」——
+  // 沒設 token 是設定問題，再試一百次都不會好，那句話會把人引去等待而不是去修。
+  if (!PropertiesService.getScriptProperties().getProperty('GITHUB_TOKEN')) {
+    console.error('未在 Script Properties 設定 GITHUB_TOKEN');
+    return { ok: false, error: '系統尚未設定 GITHUB_TOKEN，請聯絡負責人（重試不會有幫助）' };
+  }
+
   const qids = _scanQidsForDedup_(batch);
   if (!qids.length) {
     // 頁面組出來的形狀就是上面那條樣式認得的，走到這裡代表兩邊已經對不上了
@@ -174,9 +181,15 @@ function submitChecklistAnswers(payload) {
     // 那正是這把鎖要消滅的東西，別在鎖裡面自己重新製造一個。
     qids.forEach(function (qid) { cache.put(_answerKey_(jiraId, qid), answeredBy, ANSWER_CACHE_TTL); });
 
-    if (!_dispatchResumeBatch_(jiraId, pipeline, cut.text, answeredBy)) {
+    const sent = _dispatchResumeBatch_(jiraId, pipeline, cut.text, answeredBy);
+    if (!sent.ok) {
+      // 快取一定要收回，否則這批題號會被記成「已收下」，PO 重按也不會再送。
       qids.forEach(function (qid) { cache.remove(_answerKey_(jiraId, qid)); });
-      return { ok: false, error: '觸發 GitHub Actions 失敗，答案沒有送出，請稍後再試' };
+      return {
+        ok: false,
+        error: '答案沒有送出：' + sent.detail +
+               (sent.retryable ? '。請稍後再試一次。' : '，請聯絡負責人（重試不會有幫助）。')
+      };
     }
 
     // 刻意**不報「寫進幾題」**：這裡只撈了題號，沒有配對答案、也沒查閘門，
@@ -269,11 +282,17 @@ function _truncateUtf8ForPayload_(text, maxBytes) {
 // ⚠️ 欄位與 slackBotProxy 的 dispatchResumeBatch **必須一致**：resume-workflow.yml
 //    兩邊都吃同一組 client_payload，這裡少一個欄位的症狀是 Actions 起得來但
 //    續跑的是錯的 pipeline。
+// 回傳 { ok: true } 或 { ok: false, detail: '<可以顯示給人看的原因>' }。
+//
+// 刻意不回 boolean：呼叫端只拿得到 true/false 的話，「沒設 token」「token 過期」
+// 「repo 打錯」全部塌成同一句「請稍後再試」，而那三種的下一步完全不同。
+// detail 只放狀態碼與分類，不放回應內容——GitHub 的錯誤訊息可能含 repo 路徑等
+// 不必要外流給頁面訪客的資訊，完整內容留在執行記錄裡。
 function _dispatchResumeBatch_(jiraId, pipeline, rawText, user) {
   const token = PropertiesService.getScriptProperties().getProperty('GITHUB_TOKEN');
   if (!token) {
     console.error('未在 Script Properties 設定 GITHUB_TOKEN');
-    return false;
+    return { ok: false, detail: '尚未設定 GITHUB_TOKEN' };
   }
 
   const options = {
@@ -310,12 +329,27 @@ function _dispatchResumeBatch_(jiraId, pipeline, rawText, user) {
     if (code !== 204) {
       console.error('repository_dispatch 失敗（HTTP ' + code + '）：' +
                     res.getContentText().slice(0, 300));
-      return false;
+      // 401/403/404 都是「這把 token 不對」的變體（無效／權限不足／看不到這個 repo），
+      // 對人的下一步一樣：去檢查 token，而不是等一下再按一次。
+      const why = (code === 401 || code === 403 || code === 404)
+        ? 'GITHUB_TOKEN 無效或權限不足（HTTP ' + code + '）'
+        : 'GitHub 回應 HTTP ' + code;
+      return { ok: false, detail: why, retryable: !(code === 401 || code === 403 || code === 404) };
     }
-    return true;
+    return { ok: true };
   } catch (err) {
-    console.error('呼叫 GitHub API 發生異常：' + ((err && err.message) || err));
-    return false;
+    // 例外訊息原樣帶回頁面，**刻意不收斂成一句籠統的話**。
+    //
+    // 這裡最常見的例外不是網路問題，是「缺權限」——本專案以 executeAs
+    // USER_ACCESSING 部署，每個開頁面的人都要各自授權，而這次新增 UrlFetchApp
+    // 等於多要一個 script.external_request。沒授權時 GAS 拋的訊息會直接寫出
+    // 缺哪一個 scope，那正是人需要看到的東西。吞掉它的話，症狀會是
+    // 「按了送出說失敗，但 token、權限、SSO 查一輪都是對的」——實際踩過。
+    //
+    // 不怕外流：這裡是 Google 的例外訊息，不含 token，也不含 GitHub 的回應內容。
+    const msg = (err && err.message) ? String(err.message) : String(err);
+    console.error('呼叫 GitHub API 發生異常：' + msg);
+    return { ok: false, detail: msg.slice(0, 300), retryable: true };
   }
 }
 
