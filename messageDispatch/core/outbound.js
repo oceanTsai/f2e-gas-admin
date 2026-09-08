@@ -192,13 +192,24 @@ function handleAnswerResult(body, key, provider) {
     lines.push('• ' + list(s.rejected_gate) + ' 是放行閘門，只能點卡片按鈕——' +
                '文字回覆不生效（phase-guard 看到「有答覆」就會放行，不解讀語意）。');
   }
-  if (n(s.unmatched)) {
-    lines.push('⚠️ ' + list(s.unmatched) + ' 在這張單裡找不到對應的題，已忽略。' +
-               '（補問清單與流程的題號可能不同步，請回報）');
-  }
-  if (n(s.ignored_assumptions)) {
-    lines.push('• 已忽略 ' + n(s.ignored_assumptions) + ' 條 AI 假設確認（' +
-               list(s.ignored_assumptions) + '）——目前沒有地方記錄它們。');
+  // recorded_non_blocking 是新版 augma 才有的欄位：對不上 pending_questions 的題
+  // （🟡 Warning）與 AI 假設（🟢 Info）現在會被收進 progress.json 的
+  // non_blocking_answers，由 ra-phase3c 帶進規格書。它們**不擋開工**。
+  //
+  // 舊版 augma 沒有這個欄位，那時確實是丟掉的，所以保留舊文案當 fallback——
+  // 兩邊版本不同步時，訊息必須照實講，不能因為 GAS 先部署就宣稱「已記錄」。
+  if (n(s.recorded_non_blocking)) {
+    lines.push('• 已記錄 ' + n(s.recorded_non_blocking) + ' 筆不擋開工的答覆（' +
+               list(s.recorded_non_blocking) + '），會在回填階段帶進規格書。');
+  } else {
+    if (n(s.unmatched)) {
+      lines.push('⚠️ ' + list(s.unmatched) + ' 在這張單裡找不到對應的題，已忽略。' +
+                 '（補問清單與流程的題號可能不同步，請回報）');
+    }
+    if (n(s.ignored_assumptions)) {
+      lines.push('• 已忽略 ' + n(s.ignored_assumptions) + ' 條 AI 假設確認（' +
+                 list(s.ignored_assumptions) + '）——目前沒有地方記錄它們。');
+    }
   }
 
   if (n(s.still_pending)) {
