@@ -1962,6 +1962,42 @@ console.log('\n[4] messageDispatch — 出向路由與金鑰驗證');
   assert.ok(msg.indexOf('按鈕可以忽略') >= 0, '批次答完但按鈕還在，要講清楚');
   ok('answer_result → 逐類回報（寫入／已答／閘門／對不上／假設／仍待回覆）');
 
+  // 新版 augma 會把「對不上 pending_questions 的題」與 AI 假設收進
+  // non_blocking_answers（不擋開工，但會由 ra-phase3c 帶進規格書），
+  // 並在 summary 帶回 recorded_non_blocking。這時不可以再說「已忽略」——
+  // 那句話讓人以為答案掉了，實際上是留著的。
+  outCalls.length = 0;
+  doPost({ parameter:{ k:'secret' }, postData:{ contents: JSON.stringify({
+    action:'answer_result', jira_id:'VIPOP-46516',
+    conversation:{ channel:'C1', thread:'1700.1' },
+    summary:{
+      applied:['Q-001','Q-002'], unmatched:['Q-003','Q-005'],
+      ignored_assumptions:['A-001','A-005'],
+      recorded_non_blocking:['A-001','A-005','Q-003','Q-005'],
+      still_pending:[], by:'steven.chen@104.com.tw'
+    }
+  })}});
+  const nb = outCalls.join(String.fromCharCode(10));
+  assert.ok(nb.indexOf('已記錄 4 筆') >= 0, '要講出留下了幾筆');
+  assert.ok(nb.indexOf('Q-003') >= 0 && nb.indexOf('A-005') >= 0, '要點名是哪幾筆');
+  assert.ok(nb.indexOf('不擋開工') >= 0);
+  assert.ok(nb.indexOf('已忽略') < 0, '留下來了就不可以說「已忽略」');
+  assert.ok(nb.indexOf('找不到對應的題') < 0, '那句話會讓人以為資料掉了');
+  ok('有 recorded_non_blocking → 說「已記錄、不擋開工」，不再說已忽略');
+
+  // 舊版 augma 沒有這個欄位，那時確實是丟掉的——訊息必須照實講。
+  // GAS 先部署、augma 還沒更新時就是這個狀態，不能因為 GAS 新就宣稱「已記錄」。
+  outCalls.length = 0;
+  doPost({ parameter:{ k:'secret' }, postData:{ contents: JSON.stringify({
+    action:'answer_result', jira_id:'VIPOP-46516', conversation:{ channel:'C1' },
+    summary:{ applied:['Q-001'], unmatched:['Q-003'], ignored_assumptions:['A-001'],
+              still_pending:[], by:'<@U1>' }
+  })}});
+  const old = outCalls.join(String.fromCharCode(10));
+  assert.ok(old.indexOf('找不到對應的題') >= 0, '舊版 augma 要維持原本的警告');
+  assert.ok(old.indexOf('沒有地方記錄它們') >= 0);
+  ok('沒有 recorded_non_blocking（舊版 augma）→ 維持原本的「已忽略」警告');
+
   // 一題都沒寫進去也要說清楚，不能沉默——那正是「貼了但什麼都沒發生」的情境
   outCalls.length = 0;
   doPost({ parameter:{ k:'secret' }, postData:{ contents: JSON.stringify({
