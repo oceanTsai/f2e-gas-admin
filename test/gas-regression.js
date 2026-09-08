@@ -1041,26 +1041,69 @@ console.log('\n[3d+] googleDriveHtmlPreviewer — 補問清單直送（digest �
   ok('單號／pipeline／空內容／撈不到題號 → 當場擋下，不送出去讓 Actions 打回來');
 
   // ── GitHub 回非 204：快取要收回，讓人能重試 ────────────────────────
-  cache.remove(_answerKey_('VIPOP-46703','Q-001'));
-  cache.remove(_answerKey_('VIPOP-46703','Q-002'));
-  sent.length = 0;
-  httpCode = 401;
+  const reset2 = () => {
+    cache.remove(_answerKey_('VIPOP-46703','Q-001'));
+    cache.remove(_answerKey_('VIPOP-46703','Q-002'));
+    sent.length = 0;
+  };
+
+  reset2();
+  httpCode = 500;
   r = submitChecklistAnswers(ARGS);
   assert.strictEqual(r.ok, false);
   assert.strictEqual(cache.get(_answerKey_('VIPOP-46703','Q-001')), null, 'dispatch 失敗必須把快取收回');
+  assert.ok(r.error.indexOf('稍後再試') >= 0, '暫時性失敗要叫人重試');
   httpCode = 204;
+  reset2();
   r = submitChecklistAnswers(ARGS);
   assert.strictEqual(r.ok, true, '收回之後要能重試成功');
-  ok('dispatch 失敗 → 收回去重快取，PO 重按一次就能送出');
+  ok('暫時性失敗（HTTP 5xx）→ 收回快取、叫人重試，重按一次就能送出');
+
+  // ── 設定問題與暫時性失敗必須講得不一樣 ─────────────────────────────
+  //
+  // ⚠️ 回歸：這兩者曾經回同一句「觸發 GitHub Actions 失敗…請稍後再試」。
+  //    token 沒設是設定問題，再試一百次都不會好，那句話會把人引去等待而不是去修。
+  //    實際踩過：PO 按送出拿到「請稍後再試」，而真正的原因是 GITHUB_TOKEN 沒設。
+  for (const [code, label] of [[401, 'token 無效'], [403, '權限不足'], [404, '看不到 repo']]) {
+    reset2();
+    httpCode = code;
+    r = submitChecklistAnswers(ARGS);
+    assert.strictEqual(r.ok, false);
+    assert.ok(r.error.indexOf('GITHUB_TOKEN') >= 0, label + ' 要點名 GITHUB_TOKEN');
+    assert.ok(r.error.indexOf('重試不會有幫助') >= 0, label + ' 不可以叫人重試');
+    assert.ok(r.error.indexOf(String(code)) >= 0, label + ' 要帶上狀態碼方便查');
+  }
+  httpCode = 204;
+  ok('401/403/404 → 點名 GITHUB_TOKEN、明講重試沒用、附狀態碼');
+
+  // ── 例外訊息要原樣帶回頁面 ──────────────────────────────────────
+  //
+  // ⚠️ 回歸：這裡曾經把例外收斂成「呼叫 GitHub 時發生異常」。而最常見的例外是
+  //    缺 script.external_request 權限（本專案以存取者身分執行，每個人都要各自
+  //    授權），GAS 的原始訊息會直接寫出缺哪個 scope。吞掉它的症狀是
+  //    「說失敗，但 token、權限、SSO 查一輪都是對的」——實際踩過。
+  reset2();
+  const realErr = 'You do not have permission to call UrlFetchApp.fetch. ' +
+                  'Required permissions: https://www.googleapis.com/auth/script.external_request';
+  const savedFetch = UrlFetchApp.fetch;
+  UrlFetchApp.fetch = () => { throw new Error(realErr); };
+  r = submitChecklistAnswers(ARGS);
+  UrlFetchApp.fetch = savedFetch;
+  assert.strictEqual(r.ok, false);
+  assert.ok(r.error.indexOf('script.external_request') >= 0, '缺哪個 scope 必須看得到');
+  assert.strictEqual(cache.get(_answerKey_('VIPOP-46703','Q-001')), null, '例外後也要收回快取');
+  ok('呼叫時拋例外 → 原樣帶回訊息（缺權限時直接看得到缺哪個 scope）');
 
   // ── 沒有 GITHUB_TOKEN ──────────────────────────────────────────
-  cache.remove(_answerKey_('VIPOP-46703','Q-001'));
-  cache.remove(_answerKey_('VIPOP-46703','Q-002'));
+  reset2();
   PropertiesService.getScriptProperties().deleteProperty('GITHUB_TOKEN');
   r = submitChecklistAnswers(ARGS);
   assert.strictEqual(r.ok, false);
-  assert.strictEqual(cache.get(_answerKey_('VIPOP-46703','Q-001')), null);
-  ok('沒設 GITHUB_TOKEN → 明確失敗並收回快取，不會假裝送出去了');
+  assert.ok(r.error.indexOf('GITHUB_TOKEN') >= 0, '要直接講出是哪個設定沒設');
+  assert.ok(r.error.indexOf('重試不會有幫助') >= 0);
+  assert.strictEqual(sent.length, 0, '沒 token 時不該白打一次 GitHub');
+  assert.strictEqual(cache.get(_answerKey_('VIPOP-46703','Q-001')), null, '不可留下「已收下」的快取');
+  ok('沒設 GITHUB_TOKEN → 當場點名該設定，不打 API、不留快取、不叫人重試');
   `);
 }
 
