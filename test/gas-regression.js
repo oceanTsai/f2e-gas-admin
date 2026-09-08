@@ -2028,6 +2028,24 @@ console.log('\n[4] messageDispatch — 出向路由與金鑰驗證');
   assert.ok(nb.indexOf('找不到對應的題') < 0, '那句話會讓人以為資料掉了');
   ok('有 recorded_non_blocking → 說「已記錄、不擋開工」，不再說已忽略');
 
+  // ⚠️ 回歸：PO 只答 🟡 Warning / 🟢 AI 假設時，applied 是**空的**（那些題不進
+  //    pending_questions）。這是完全正常的形狀，但開場白曾經說「沒有寫入任何一題」，
+  //    下一行又說「已記錄 9 筆」——兩句擺在一起讀起來像答案掉了。實測踩過。
+  outCalls.length = 0;
+  doPost({ parameter:{ k:'secret' }, postData:{ contents: JSON.stringify({
+    action:'answer_result', jira_id:'VIPOP-46516', conversation:{ channel:'C1' },
+    summary:{
+      applied:[], unmatched:['Q-003','Q-009'], ignored_assumptions:['A-001'],
+      recorded_non_blocking:['A-001','Q-003','Q-009'],
+      still_pending:[], by:'steven.chen@104.com.tw'
+    }
+  })}});
+  const only = outCalls.join(String.fromCharCode(10));
+  assert.ok(only.indexOf('沒有寫入任何一題') < 0, '有記錄下來就不可以說「沒有寫入任何一題」');
+  assert.ok(only.indexOf('流程不受影響') >= 0, '要講清楚這是正常狀態，不是出事');
+  assert.ok(only.indexOf('已記錄 3 筆') >= 0);
+  ok('只答不擋開工的題（applied 為空）→ 開場白不自相矛盾');
+
   // 舊版 augma 沒有這個欄位，那時確實是丟掉的——訊息必須照實講。
   // GAS 先部署、augma 還沒更新時就是這個狀態，不能因為 GAS 新就宣稱「已記錄」。
   outCalls.length = 0;

@@ -181,6 +181,8 @@ function handleAnswerResult(body, key, provider) {
 
   if (n(s.applied)) {
     lines.push('✅ ' + by + '的批次回覆已寫入 ' + jiraId + '：' + list(s.applied));
+  } else if (n(s.recorded_non_blocking)) {
+    lines.push('ℹ️ ' + by + '的回覆沒有涉及待決題（' + jiraId + '），流程不受影響。');
   } else {
     lines.push('ℹ️ ' + by + '貼上的內容沒有寫入任何一題（' + jiraId + '）。');
   }
