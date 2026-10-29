@@ -45,7 +45,8 @@ f2e-gas-admin/
 | 資料夾 | 用途 | 備註 |
 |---|---|---|
 | `slackBotProxy` | Slack Event Subscription 接收與 app_mention 路由 | GAS Web App，對外 `/exec` |
-| `googleDriveHtmlPreviewer` | 將雲端硬碟 RA 資料夾底下的 HTML 檔直接渲染成網頁；並提供補問清單的「送出答案」 | GAS Web App，`?p=` 帶相對路徑；以存取者身分執行，實際可見範圍由 Drive 權限決定 |
+| `googleDriveHtmlPreviewer` | 用 GitHub API 從 `feature/<JIRA_ID>` 分支讀 `workspace/ra_outputs/html/<檔名>`，渲染成網頁；並提供補問清單的「送出答案」 | GAS Web App，`?p=<JIRA_ID>/<檔名>`；部署為「網域內使用者」可看（任何同事拿到網址都看得到），要收窄用 `ALLOWED_VIEWERS`。檔案沒推上分支或分支被刪 → 「找不到這個頁面」 |
+| `googleDriveHtmlUploader` | **已退役**——HTML 不再上傳，改由 augma 推上分支、previewer 直接讀 | 程式碼保留待刪 |
 | _（待補）_ | | |
 
 ### 部署後要設的 Script Properties
@@ -55,11 +56,13 @@ f2e-gas-admin/
 | `slackBotProxy` | `SLACK_TOKEN` / `GITHUB_TOKEN` / `NOTIFY_KEY` / `CHAT_PROVIDER` | 見 `core/diagnose.js` |
 | `slackBotProxy` | `SHADOW_LLM`（`openai`／`gemini`，預設 `openai`）＋對應的 `OPENAI_API_KEY`／`GEMINI_API_KEY` | 意圖影子分類：只觀察、不接執行。**沒設當前 provider 的金鑰就是關閉**，不會有第二個開關。見 `core/llm/index.js`、`core/classifiers/shadowIntent.js` |
 | `googleDriveHtmlPreviewer` | `GITHUB_TOKEN` | 對 augma 發 `repository_dispatch`（補問清單的「送出答案」） |
+| `googleDriveHtmlPreviewer` | `GITHUB_READ_TOKEN`（選用） | 讀 `feature/<JIRA_ID>` 分支上的 HTML；建議只開 Contents: read；未設則沿用 `GITHUB_TOKEN` |
+| `googleDriveHtmlPreviewer` | `ALLOWED_VIEWERS`（選用） | 收窄可檢視者名單；未設則網域內使用者皆可看 |
 
 > **補問清單的「送出答案」怎麼走**
 > `checkList.html` 是 previewer 用 `HtmlService` 算繪的，所以頁面跑在 previewer 的
 > sandbox 裡，能直接 `google.script.run.submitChecklistAnswers(...)`——不必處理 CORS，
-> 更重要的是**不必把任何金鑰放進那份 HTML**（它躺在 Drive 上、分享給整個根資料夾的名單）。
+> 更重要的是**不必把任何金鑰放進那份 HTML**（它躺在 git 分支上，網域內拿到網址的人都讀得到）。
 > previewer 收到後自己對 GitHub 發 `repository_dispatch(resume)`，不經過 `slackBotProxy`。
 >
 > **為什麼不經 `slackBotProxy` 共用它的去重鎖**：`digest` 模式下這一頁是**唯一**的

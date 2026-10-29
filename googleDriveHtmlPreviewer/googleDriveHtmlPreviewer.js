@@ -1,51 +1,59 @@
 /**
- * googleDriveHtmlPreviewer — 把 Drive 裡的 HTML 檔算繪出來給人看
+ * googleDriveHtmlPreviewer — 把 augma 分支上的 HTML 產物算繪出來給人看
  *
- * ⚠️ ARCHIVE_FOLDER_ID 必須與 gas/augma-html-upload 的 ROOT_FOLDER_ID 一致。
- *    上傳端寫到別的資料夾時，這裡一律回「找不到這個頁面」——而且是 200 的正常
- *    頁面，不是錯誤，上傳端完全看不出有問題。
+ * 網址：<本服務 /exec>?p=<JIRA_ID>/<檔名>
+ * 來源：augma repo 的 feature/<JIRA_ID> 分支、workspace/ra_outputs/html/<檔名>
+ *       （augma 的 commit-phase.sh 每階跑完就把產物推上這個分支）。
+ *
+ * ── 為什麼從 GitHub 讀，而不是 Drive ──
+ * 搬進公司 GWS 後，web app 的存取權只能選「網域內使用者」，GitHub Actions 再也
+ * 打不進上傳用的 GAS（它沒有公司帳號）。產物本來就已經在分支上，與其為了上傳
+ * 申請 OAuth client，不如讓這支 GAS 自己去拿——GAS 主動往外呼叫只需要 GitHub 的
+ * token，不需要任何 Google 端的憑證。專名 googleDriveHtmlPreviewer 沿用舊名，
+ * 因為 clasp 設定與既有文件都以此為鍵。
+ *
+ * ── 誰看得到 ──
+ * 部署是 access: DOMAIN，門檻是「公司帳號」。repo 是私人的，但讀檔用的是 Script
+ * Properties 裡的 token，看頁面的人不需要 GitHub 帳號——也因此**任何同事拿到網址
+ * 都看得到任何一張票**。要收窄就設 ALLOWED_VIEWERS（見 isAllowedViewer_）。
+ *
+ * ── Script Properties ──
+ *   GITHUB_READ_TOKEN  讀檔用；建議只開 Contents: read。未設則沿用 GITHUB_TOKEN
+ *   ALLOWED_VIEWERS    可看頁面的 email，逗號或換行分隔；未設＝網域內都可看
  */
 
-const ARCHIVE_FOLDER_ID = '1VgZA9Y1P6w5GafKDQPgXTZ-XpfpzBtsc';  // 專門放這些頁面的資料夾
+const HTML_DIR = 'workspace/ra_outputs/html';
+const BRANCH_PREFIX = 'feature/';     // 與 augma commit-phase.sh 的 AUGMA_BRANCH_PREFIX 預設一致
+
+// p 參數的白名單。token 讀得到整個 repo（.claude/、docs/、所有分支），這裡是
+// 唯一擋住「?p=../../.claude/…」的地方——放寬任何一條之前先想清楚那會讓誰讀到什麼。
+const JIRA_ID_RE = /^[A-Z][A-Z0-9]+-[0-9]+$/;
+const HTML_NAME_RE = /^[A-Za-z0-9._-]+\.html?$/;   // 與 rewriteLinks_ 認得的檔名字元一致
 
 function doGet(e) {
   const path = (e && e.parameter && e.parameter.p) || '';
   const segments = path.split('/').filter((s) => s !== '');
-  const fileName = segments.pop();
-  // 檔案所在的資料夾路徑：改寫相對連結時要把它接回去
-  const folderPath = segments.join('/');
 
   try {
-    const folder = segments.reduce((acc, name) => {
-      let next = null;
-      if (acc !== null) {
-        const subs = acc.getFoldersByName(name);
-        if (subs.hasNext()) {
-          next = subs.next();
+    // 只收恰好兩段：<JIRA_ID>/<檔名>。augma 的 publish-html.sh 只會組出這個形狀，
+    // 其他形狀一律當不存在，不嘗試「猜」使用者想看哪個檔。
+    if (segments.length === 2) {
+      const jiraId = segments[0];
+      const fileName = segments[1];
+      if (JIRA_ID_RE.test(jiraId) && HTML_NAME_RE.test(fileName) &&
+          fileName.indexOf('..') < 0 && isAllowedViewer_()) {
+        const html = fetchHtmlFromGitHub_(jiraId, fileName);
+        if (html !== null) {
+          return HtmlService.createHtmlOutput(rewriteLinks_(html, jiraId))
+            .setTitle(fileName);
         }
       }
-      return next;
-    }, DriveApp.getFolderById(ARCHIVE_FOLDER_ID));
-
-    let file = null;
-    if (folder !== null && fileName) {
-      const files = folder.getFilesByName(fileName);
-      if (files.hasNext()) {
-        file = files.next();
-      }
-    }
-
-    if (file !== null) {
-      const html = file.getBlob().getDataAsString('UTF-8');
-      return HtmlService.createHtmlOutput(rewriteLinks_(html, folderPath))
-        .setTitle(file.getName());
     }
   } catch (err) {
-    // 以存取者身分執行時，沒有 Drive 權限的人一開啟就會在 DriveApp 這裡拋例外，
-    // 這是常態路徑而非意外。不讓它冒到最上層的理由有二：
-    //   1. GAS 的原始錯誤頁會把 ARCHIVE_FOLDER_ID 顯示出來，沒必要送給無權限的人。
-    //   2. 「無權限」與「不存在」刻意回同一句話，否則兩者的差異可以被拿來
-    //      逐一試誤、探測哪些路徑真的存在。
+    // 不讓例外冒到最上層的理由有二：
+    //   1. GAS 的原始錯誤頁可能帶出 repo 路徑等細節，沒必要送給頁面訪客。
+    //   2. 「無權限」「格式不對」「不存在」刻意回同一句話，否則三者的差異可以被拿來
+    //      逐一試誤、探測哪些單號真的存在。
     // 真正的原因寫進 Cloud Logging，排查時用 clasp logs 看，使用者端看不到。
     console.error('doGet 讀取失敗 p=' + path + '：' + ((err && err.message) || err));
   }
@@ -53,13 +61,75 @@ function doGet(e) {
   return HtmlService.createHtmlOutput('<h1>找不到這個頁面</h1>');
 }
 
+
+// ALLOWED_VIEWERS 未設＝不限制（網域內都可看）。設了就比對 email（不分大小寫）。
+// 取不到 email 時（理論上 USER_ACCESSING ＋ 同網域不會發生）一律拒絕——
+// 名單存在的意義就是收窄，取不到身分卻放行等於名單失效。
+function isAllowedViewer_() {
+  const raw = PropertiesService.getScriptProperties().getProperty('ALLOWED_VIEWERS');
+  if (!raw || !raw.trim()) return true;
+
+  const allowed = raw.split(/[,\n]/)
+    .map(function (s) { return s.trim().toLowerCase(); })
+    .filter(function (s) { return s !== ''; });
+
+  let email = '';
+  try {
+    email = String(Session.getActiveUser().getEmail() || '').toLowerCase();
+  } catch (err) {
+    console.warn('取不到瀏覽者身分：' + ((err && err.message) || err));
+  }
+  if (!email || allowed.indexOf(email) < 0) {
+    console.warn('ALLOWED_VIEWERS 拒絕：' + (email || '(無 email)'));
+    return false;
+  }
+  return true;
+}
+
+
+// 從 feature/<JIRA_ID> 讀 HTML 原文。找不到回 null；其他失敗拋例外（由 doGet 記錄）。
+//
+// 用 contents API ＋ raw media type，而不是 raw.githubusercontent.com：
+// 前者對私人 repo 的認證方式與 dispatch 那條完全相同，後者的 token 行為另有一套。
+// raw media type 的單檔上限是 100 MB，遠高於 contents API 預設 JSON 的 1 MB。
+function fetchHtmlFromGitHub_(jiraId, fileName) {
+  const props = PropertiesService.getScriptProperties();
+  const token = props.getProperty('GITHUB_READ_TOKEN') || props.getProperty('GITHUB_TOKEN');
+  if (!token) throw new Error('未在 Script Properties 設定 GITHUB_READ_TOKEN / GITHUB_TOKEN');
+
+  const url = 'https://api.github.com/repos/' + AUGMA_GITHUB_REPO + '/contents/' +
+    HTML_DIR + '/' + encodeURIComponent(fileName) +
+    '?ref=' + encodeURIComponent(BRANCH_PREFIX + jiraId);
+
+  const res = UrlFetchApp.fetch(url, {
+    method: 'get',
+    headers: {
+      'Authorization': 'token ' + token,
+      'Accept': 'application/vnd.github.raw',
+      'User-Agent': 'GAS-Augma-Previewer'
+    },
+    muteHttpExceptions: true
+  });
+
+  const code = res.getResponseCode();
+  if (code === 200) return res.getContentText('UTF-8');
+  // 404 同時涵蓋「分支不存在」「檔案不存在」與「token 看不到這個私人 repo」——
+  // GitHub 對無權限的私人資源一律回 404。後者是設定問題，所以仍記一筆，
+  // 排查時才不會把「token 失效」誤認成「PO 點了舊連結」。
+  if (code === 404) {
+    console.warn('GitHub 404：' + jiraId + '/' + fileName);
+    return null;
+  }
+  throw new Error('GitHub 回應 HTTP ' + code + '：' + res.getContentText().slice(0, 300));
+}
+
 // ═══════════════════════════════════════════════════════════════════
 //  補問清單的「送出答案」
 //
 //  checkList.html 是這支 GAS 用 HtmlService 算繪的，所以頁面跑在本專案的 sandbox
 //  裡，google.script.run 直接到得了下面這支函式：不必處理 CORS，更重要的是
-//  **不必把任何金鑰放進 HTML**——那份 HTML 躺在 Drive 上、分享給整個根資料夾的
-//  名單，內嵌金鑰等於發給所有看得到任一張票的人。
+//  **不必把任何金鑰放進 HTML**——那份 HTML 躺在 git 分支上、網域內任何人都可能
+//  看到，內嵌金鑰等於發給所有看得到任一張票的人。
 //
 //  ── 為什麼直接打 GitHub，而不是轉一手給 slackBotProxy ──
 //  digest 模式下這一頁是**唯一**的作答入口：Slack 那則訊息沒有按鈕（走
@@ -359,11 +429,8 @@ function _dispatchResumeBatch_(jiraId, pipeline, rawText, user) {
  *
  * ── 為什麼改寫要放在這裡，而不是產檔時就寫死絕對網址 ──
  * 產出的 HTML 保持乾淨的相對路徑，才能在本機直接開、在 git diff 裡讀、
- * 日後換別的託管方式也不必重產一輪。這裡是唯一知道「自己被掛在哪個網址」
- * 的地方，改寫的責任就該在這裡。
- *
- * 而且上傳端的資料夾名含一段 HMAC 後綴（防列舉），產檔時根本還算不出來——
- * 要在產檔時寫死絕對網址，就得先上傳拿到資料夾名、改寫、再上傳一次。
+ * 日後換別的託管方式也不必重產一輪（從 Drive 換到 GitHub 時就沒重產任何檔）。
+ * 這裡是唯一知道「自己被掛在哪個網址」的地方，改寫的責任就該在這裡。
  *
  * ── 為什麼要設 <base target="_top"> ──
  * HtmlService 的輸出跑在 sandbox iframe 裡。不設的話點連結會試圖在 iframe 內

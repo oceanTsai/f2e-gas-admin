@@ -101,6 +101,8 @@ console.log('[0] GAS 全域 scope — 專案內所有檔案能否共存');
   const ALLOWED_PROPS = [
     'SLACK_TOKEN',        // Slack Bot User OAuth Token（xoxb-）
     'GITHUB_TOKEN',       // repository_dispatch + 讀 progress.json
+    'GITHUB_READ_TOKEN',  // previewer 讀 HTML 用；未設沿用 GITHUB_TOKEN
+    'ALLOWED_VIEWERS',    // previewer 的瀏覽者白名單；未設＝網域內都可看
     'NOTIFY_KEY',         // runner → GAS 的共享金鑰
     'CHAT_PROVIDER',      // slack / googlechat
     'TEST_WEBHOOK_URL',   // 測試用固定頻道 webhook
@@ -1104,6 +1106,92 @@ console.log('\n[3d+] googleDriveHtmlPreviewer — 補問清單直送（digest �
   assert.strictEqual(sent.length, 0, '沒 token 時不該白打一次 GitHub');
   assert.strictEqual(cache.get(_answerKey_('VIPOP-46703','Q-001')), null, '不可留下「已收下」的快取');
   ok('沒設 GITHUB_TOKEN → 當場點名該設定，不打 API、不留快取、不叫人重試');
+  `);
+}
+
+
+// ══════════════════════════════════════════════════════════════════
+console.log('\n[3d++] googleDriveHtmlPreviewer — doGet 從 augma 分支讀 HTML');
+// ══════════════════════════════════════════════════════════════════
+{
+  const env = mkEnv({ GITHUB_TOKEN: 'ghp_dispatch' });
+  Object.assign(global, env.globals);
+
+  const fetched = [];
+  let respond = () => ({ code: 200, body: '<html><head></head><body><a href="spec.html">x</a></body></html>' });
+  let activeUser = 'po@104.com.tw';
+
+  global.UrlFetchApp = { fetch: (url, opt) => {
+    fetched.push({ url: url, opt: opt });
+    const r = respond(url);
+    return { getResponseCode: () => r.code, getContentText: () => r.body };
+  }};
+  global.Session = { getActiveUser: () => ({ getEmail: () => activeUser }) };
+  global.HtmlService = { createHtmlOutput: (h) => ({ _html: h, setTitle(t) { this._title = t; return this; } }) };
+  global.ScriptApp = { getService: () => ({ getUrl: () => 'https://x/exec' }) };
+
+  eval(src(['googleDriveHtmlPreviewer/googleDriveHtmlPreviewer.js']) + `
+  const NOT_FOUND = '<h1>找不到這個頁面</h1>';
+  const get = (p) => doGet({ parameter: { p: p } });
+  const props = PropertiesService.getScriptProperties();
+
+  // ── 正常讀取 ────────────────────────────────────────────────────
+  let out = get('VIPOP-123/checkList.html');
+  assert.strictEqual(fetched.length, 1);
+  assert.strictEqual(fetched[0].url,
+    'https://api.github.com/repos/104corp/104.vip.f2e.augma/contents/' +
+    'workspace/ra_outputs/html/checkList.html?ref=feature%2FVIPOP-123');
+  assert.strictEqual(fetched[0].opt.headers.Accept, 'application/vnd.github.raw');
+  assert.strictEqual(fetched[0].opt.headers.Authorization, 'token ghp_dispatch');
+  assert.strictEqual(out._title, 'checkList.html');
+  assert.ok(out._html.indexOf('href="https://x/exec?p=VIPOP-123%2Fspec.html"') >= 0, '相對連結改寫成同單號');
+  assert.ok(out._html.indexOf('<base target="_top">') >= 0);
+  ok('?p=<JIRA_ID>/<檔名> → 讀 feature/<JIRA_ID> 的 workspace/ra_outputs/html/<檔名>');
+
+  // ── 讀取專用 token 優先 ─────────────────────────────────────────
+  fetched.length = 0;
+  props.setProperty('GITHUB_READ_TOKEN', 'ghp_read');
+  get('VIPOP-123/checkList.html');
+  assert.strictEqual(fetched[0].opt.headers.Authorization, 'token ghp_read');
+  props.deleteProperty('GITHUB_READ_TOKEN');
+  ok('有 GITHUB_READ_TOKEN 就用它，沒有才沿用 GITHUB_TOKEN');
+
+  // ── p 白名單：token 讀得到整個 repo，這裡是唯一的防線 ──────────
+  fetched.length = 0;
+  for (const bad of [
+    '', 'checkList.html', 'VIPOP-123', 'VIPOP-123/../x.html', '../VIPOP-123/x.html',
+    'VIPOP-123/sub/x.html', 'vipop-123/x.html', 'VIPOP-123/x.md', 'VIPOP-123/..html',
+    'VIPOP-123/.claude%2Fsettings.html', 'X/VIPOP-123/x.html'
+  ]) {
+    assert.strictEqual(get(bad)._html, NOT_FOUND, '應拒絕：' + bad);
+  }
+  assert.strictEqual(fetched.length, 0, '格式不符時不該打 GitHub');
+  ok('路徑穿越、多層路徑、非 .html、小寫單號 → 一律「找不到」且不打 API');
+
+  // ── 不存在／錯誤 → 同一句話 ─────────────────────────────────────
+  respond = () => ({ code: 404, body: '{"message":"Not Found"}' });
+  assert.strictEqual(get('VIPOP-123/checkList.html')._html, NOT_FOUND);
+  respond = () => ({ code: 500, body: 'boom' });
+  assert.strictEqual(get('VIPOP-123/checkList.html')._html, NOT_FOUND);
+  props.deleteProperty('GITHUB_TOKEN');
+  assert.strictEqual(get('VIPOP-123/checkList.html')._html, NOT_FOUND);
+  props.setProperty('GITHUB_TOKEN', 'ghp_dispatch');
+  respond = () => ({ code: 200, body: '<p>ok</p>' });
+  ok('404／5xx／沒設 token → 同一句「找不到」，不外露差異');
+
+  // ── ALLOWED_VIEWERS ─────────────────────────────────────────────
+  fetched.length = 0;
+  props.setProperty('ALLOWED_VIEWERS', 'rd@104.com.tw,\\n PO@104.com.tw ');
+  assert.notStrictEqual(get('VIPOP-123/checkList.html')._html, NOT_FOUND, '名單內（不分大小寫、容忍空白）');
+  activeUser = 'other@104.com.tw';
+  assert.strictEqual(get('VIPOP-123/checkList.html')._html, NOT_FOUND);
+  activeUser = '';
+  assert.strictEqual(get('VIPOP-123/checkList.html')._html, NOT_FOUND, '取不到身分時一律拒絕');
+  assert.strictEqual(fetched.length, 1, '被名單擋下時不該打 GitHub');
+  props.deleteProperty('ALLOWED_VIEWERS');
+  assert.notStrictEqual(get('VIPOP-123/checkList.html')._html, NOT_FOUND, '未設名單＝不限制');
+  activeUser = 'po@104.com.tw';
+  ok('ALLOWED_VIEWERS：設了才收窄；名單外與取不到身分都拒絕');
   `);
 }
 
