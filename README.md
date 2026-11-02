@@ -65,6 +65,12 @@ f2e-gas-admin/
 > 更重要的是**不必把任何金鑰放進那份 HTML**（它躺在 git 分支上，網域內拿到網址的人都讀得到）。
 > previewer 收到後自己對 GitHub 發 `repository_dispatch(resume)`，不經過 `slackBotProxy`。
 >
+> **已答題的狀態**：檔名符合 `/checklist\.html?$/i` 時，previewer 會多讀同分支的
+> `workspace/progress.json`，把 `answered === true` 的題以
+> `<script>window.__AUGMA_ANSWERED__ = {"Q-001":{"answer":…,"answered_by":…,"answered_at":…}};</script>`
+> 注入在 `</head>` 前（值為字串或 `null`；一題都沒答是 `{}`）。讀不到或格式不符時
+> **不注入、頁面照常**（變數為 `undefined`），其他檔名不受影響、也不多打 API。
+>
 > **為什麼不經 `slackBotProxy` 共用它的去重鎖**：`digest` 模式下這一頁是**唯一**的
 > 作答入口——Slack 那則訊息沒有按鈕（走 `notify-ra-result.sh`），而貼回 thread 的
 > 補問回覆已由 `core/classifiers/rules.js` 的規則 1 依每題的 `notify_mode` 擋在

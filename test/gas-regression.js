@@ -1118,7 +1118,11 @@ console.log('\n[3d++] googleDriveHtmlPreviewer — doGet 從 augma 分支讀 HTM
   Object.assign(global, env.globals);
 
   const fetched = [];
-  let respond = () => ({ code: 200, body: '<html><head></head><body><a href="spec.html">x</a></body></html>' });
+  // checkList.html 會多讀一次 progress.json；這一節不測它，一律回 404（＝舊分支沒有該檔）。
+  const PAGE = '<html><head></head><body><a href="spec.html">x</a></body></html>';
+  let respond = (url) => (url.indexOf('progress.json') >= 0
+    ? { code: 404, body: '{"message":"Not Found"}' }
+    : { code: 200, body: PAGE });
   let activeUser = 'po@104.com.tw';
 
   global.UrlFetchApp = { fetch: (url, opt) => {
@@ -1137,7 +1141,7 @@ console.log('\n[3d++] googleDriveHtmlPreviewer — doGet 從 augma 分支讀 HTM
 
   // ── 正常讀取 ────────────────────────────────────────────────────
   let out = get('VIPOP-123/checkList.html');
-  assert.strictEqual(fetched.length, 1);
+  assert.strictEqual(fetched.length, 2, 'checkList 另讀 progress.json（見 [3d+++]）');
   assert.strictEqual(fetched[0].url,
     'https://api.github.com/repos/104corp/104.vip.f2e.augma/contents/' +
     'workspace/ra_outputs/html/checkList.html?ref=feature%2FVIPOP-123');
@@ -1187,11 +1191,130 @@ console.log('\n[3d++] googleDriveHtmlPreviewer — doGet 從 augma 分支讀 HTM
   assert.strictEqual(get('VIPOP-123/checkList.html')._html, NOT_FOUND);
   activeUser = '';
   assert.strictEqual(get('VIPOP-123/checkList.html')._html, NOT_FOUND, '取不到身分時一律拒絕');
-  assert.strictEqual(fetched.length, 1, '被名單擋下時不該打 GitHub');
+  assert.strictEqual(fetched.length, 2, '被名單擋下時不該打 GitHub（2＝放行那次的 HTML ＋ progress.json）');
   props.deleteProperty('ALLOWED_VIEWERS');
   assert.notStrictEqual(get('VIPOP-123/checkList.html')._html, NOT_FOUND, '未設名單＝不限制');
   activeUser = 'po@104.com.tw';
   ok('ALLOWED_VIEWERS：設了才收窄；名單外與取不到身分都拒絕');
+  `);
+}
+
+
+// ══════════════════════════════════════════════════════════════════
+console.log('\n[3d+++] googleDriveHtmlPreviewer — checkList 注入已答題（window.__AUGMA_ANSWERED__）');
+// 失敗一律「不注入、頁面照常」：這是錦上添花的狀態顯示，不能讓清單頁本身打不開。
+// ══════════════════════════════════════════════════════════════════
+{
+  const env = mkEnv({ GITHUB_TOKEN: 'ghp_dispatch' });
+  Object.assign(global, env.globals);
+
+  const fetched = [];
+  const PAGE = '<html><HEAD><title>t</title></HEAD><body><a href="spec.html">x</a></body></html>';
+  let page = PAGE;
+  let progress = { code: 200, body: '{}' };
+  global.UrlFetchApp = { fetch: (url, opt) => {
+    fetched.push(url);
+    const r = url.indexOf('progress.json') >= 0 ? progress : { code: 200, body: page };
+    return { getResponseCode: () => r.code, getContentText: () => r.body };
+  }};
+  global.Session = { getActiveUser: () => ({ getEmail: () => 'po@104.com.tw' }) };
+  global.HtmlService = { createHtmlOutput: (h) => ({ _html: h, setTitle(t) { this._title = t; return this; } }) };
+  global.ScriptApp = { getService: () => ({ getUrl: () => 'https://x/exec' }) };
+
+  const MARK = '<script>window.__AUGMA_ANSWERED__ = ';
+  // 用真的 HTML 解析規則的最小替身：從注入點起找第一個 </script，中間那段就是 script 內容。
+  // 若答案能斷出 script，這裡切到的會是半截 JSON，JSON.parse 會失敗。
+  function extract(html) {
+    const i = html.indexOf(MARK);
+    if (i < 0) return undefined;
+    const body = html.slice(i + '<script>'.length, html.toLowerCase().indexOf('</script', i));
+    const m = body.match(/^window\.__AUGMA_ANSWERED__ = ([\s\S]*);$/);
+    assert.ok(m, 'script 內容形狀不符：' + body);
+    return JSON.parse(m[1]);
+  }
+
+  eval(src(['googleDriveHtmlPreviewer/googleDriveHtmlPreviewer.js']) + `
+  const get = (p) => doGet({ parameter: { p: p } });
+
+  // ── 有已答題：注入、內容正確、未答題不在其中 ──────────────────────
+  progress = { code: 200, body: JSON.stringify({ pending_questions: [
+    { id: 'Q-001', answered: true, answer: 'A. 甲案', answered_by: 'po@104.com.tw',
+      answered_at: '2026-11-01T10:00:00Z', question: '不該帶出去', options: ['x'] },
+    { id: 'Q-002', answered: false, answer: null },
+    { id: 'Q-003', answered: 'true', answer: '字串 true 不算' },
+    { id: 'Q-004', answered: true, answer: 42, answered_by: '<@U1>' },
+    { id: 'Q-005' },
+  ]})};
+  fetched.length = 0;
+  let out = get('VIPOP-123/checkList.html');
+  assert.strictEqual(fetched.length, 2);
+  assert.strictEqual(fetched[1],
+    'https://api.github.com/repos/104corp/104.vip.f2e.augma/contents/' +
+    'workspace/progress.json?ref=feature%2FVIPOP-123');
+  assert.deepStrictEqual(extract(out._html), {
+    'Q-001': { answer: 'A. 甲案', answered_by: 'po@104.com.tw', answered_at: '2026-11-01T10:00:00Z' },
+    'Q-004': { answer: '42', answered_by: '<@U1>', answered_at: null },
+  });
+  assert.ok(out._html.indexOf(';</script></HEAD>') >= 0, '插在 </head> 之前（不分大小寫）');
+  assert.ok(out._html.indexOf('href="https://x/exec?p=VIPOP-123%2Fspec.html"') >= 0, '連結改寫照常');
+  assert.ok(out._html.indexOf('<base target="_top">') >= 0);
+  ok('checkList：answered === true 的題以 window.__AUGMA_ANSWERED__ 注入，只帶三欄、未答題不在其中');
+
+  // ── 一題都沒答 → 注入空物件（與「讀不到」可區分）──────────────────
+  progress = { code: 200, body: JSON.stringify({ pending_questions: [{ id: 'Q-001', answered: false }] }) };
+  assert.deepStrictEqual(extract(get('VIPOP-123/checkList.html')._html), {});
+  ok('沒有已答題 → 注入 {}');
+
+  // ── 檔名比對不分大小寫；其他檔不讀 progress.json ────────────────
+  fetched.length = 0;
+  assert.notStrictEqual(extract(get('VIPOP-123/CHECKLIST.htm')._html), undefined);
+  assert.strictEqual(fetched.length, 2);
+  fetched.length = 0;
+  out = get('VIPOP-123/spec.html');
+  assert.strictEqual(fetched.length, 1, '非 checklist 檔只打一次 API');
+  assert.ok(fetched[0].indexOf('progress.json') < 0);
+  assert.strictEqual(out._html.indexOf('__AUGMA_ANSWERED__'), -1);
+  ok('非 checklist 檔不讀 progress.json、不注入');
+
+  // ── 失敗：頁面照常、無注入、不拋例外 ────────────────────────────
+  for (const [label, r] of [
+    ['404', { code: 404, body: '{"message":"Not Found"}' }],
+    ['500', { code: 500, body: 'boom' }],
+    ['壞 JSON', { code: 200, body: '{not json' }],
+    ['null', { code: 200, body: 'null' }],
+    ['缺 pending_questions', { code: 200, body: '{"status":"x"}' }],
+    ['pending_questions 非陣列', { code: 200, body: '{"pending_questions":{}}' }],
+  ]) {
+    progress = r;
+    out = get('VIPOP-123/checkList.html');
+    assert.strictEqual(out._title, 'checkList.html', label + '：頁面應照常回傳');
+    assert.strictEqual(out._html.indexOf('__AUGMA_ANSWERED__'), -1, label + '：不該注入');
+    assert.ok(out._html.indexOf('<a href="https://x/exec?p=VIPOP-123%2Fspec.html">') >= 0, label);
+  }
+  progress = { code: 200, body: '{}' };
+  ok('progress.json 404／5xx／壞 JSON／結構不符 → 頁面照常回傳、無注入');
+
+  // ── 答案含 </script>、<!--、U+2028/2029、$& 都不會斷出或變形 ───────
+  const evil = 'x</script><img src=x onerror=alert(1)><!-- \\u2028\\u2029 $& $\\' end';
+  progress = { code: 200, body: JSON.stringify({ pending_questions: [
+    { id: 'Q-001', answered: true, answer: evil, answered_by: '</SCRIPT>', answered_at: null }
+  ]})};
+  out = get('VIPOP-123/checkList.html');
+  const script = out._html.slice(out._html.indexOf(MARK), out._html.indexOf('</HEAD>'));
+  assert.strictEqual(script.toLowerCase().split('</script').length, 2, '整段只有注入的那一個 </script>');
+  assert.strictEqual(script.indexOf('<', 1), script.indexOf('</script>'), 'JSON 內不含任何 <');
+  assert.ok(script.indexOf('\\u2028') < 0 && script.indexOf('\\u2029') < 0, '不含原始 U+2028/2029');
+  assert.deepStrictEqual(extract(out._html), { 'Q-001': { answer: evil, answered_by: '</SCRIPT>', answered_at: null } });
+  ok('答案含 </script>、U+2028/2029、$& → 跳脫後原樣還原，不會斷出 script');
+
+  // ── 沒有 </head> → 擺最前面 ────────────────────────────────────
+  page = '<p>fragment</p>';
+  progress = { code: 200, body: JSON.stringify({ pending_questions: [{ id: 'Q-009', answered: true, answer: 'y' }] }) };
+  out = get('VIPOP-123/checkList.html');
+  assert.strictEqual(out._html.indexOf(MARK), 0);
+  assert.deepStrictEqual(extract(out._html), { 'Q-009': { answer: 'y', answered_by: null, answered_at: null } });
+  page = PAGE;
+  ok('沒有 </head> → 注入擺在最前面');
   `);
 }
 
