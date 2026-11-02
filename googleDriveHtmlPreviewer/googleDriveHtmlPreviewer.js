@@ -30,6 +30,10 @@ const BRANCH_PREFIX = 'feature/';     // 與 augma commit-phase.sh 的 AUGMA_BRA
 const JIRA_ID_RE = /^[A-Z][A-Z0-9]+-[0-9]+$/;
 const HTML_NAME_RE = /^[A-Za-z0-9._-]+\.html?$/;   // 與 rewriteLinks_ 認得的檔名字元一致
 
+// 只有補問清單需要知道「哪些題已經答過」。其他頁面不讀 progress.json，不多打 API。
+const CHECKLIST_NAME_RE = /checklist\.html?$/i;
+const PROGRESS_PATH = 'workspace/progress.json';
+
 function doGet(e) {
   const path = (e && e.parameter && e.parameter.p) || '';
   const segments = path.split('/').filter((s) => s !== '');
@@ -44,8 +48,14 @@ function doGet(e) {
           fileName.indexOf('..') < 0 && isAllowedViewer_()) {
         const html = fetchHtmlFromGitHub_(jiraId, fileName);
         if (html !== null) {
-          return HtmlService.createHtmlOutput(rewriteLinks_(html, jiraId))
-            .setTitle(fileName);
+          let out = rewriteLinks_(html, jiraId);
+          // 注入放在 rewriteLinks_ **之後**：注入的 JSON 是 PO 寫的自由文字，
+          // 不該讓連結改寫的正規表達式有機會碰到它。
+          if (CHECKLIST_NAME_RE.test(fileName)) {
+            const answered = loadAnsweredMap_(jiraId);
+            if (answered !== null) out = injectAnsweredScript_(out, answered);
+          }
+          return HtmlService.createHtmlOutput(out).setTitle(fileName);
         }
       }
     }
@@ -88,17 +98,27 @@ function isAllowedViewer_() {
 
 
 // 從 feature/<JIRA_ID> 讀 HTML 原文。找不到回 null；其他失敗拋例外（由 doGet 記錄）。
+function fetchHtmlFromGitHub_(jiraId, fileName) {
+  return fetchRepoFileFromGitHub_(jiraId, HTML_DIR + '/' + fileName);
+}
+
+
+// 從 feature/<JIRA_ID> 讀 repo 內任意路徑的檔案原文。找不到回 null；其他失敗拋例外。
+// 路徑逐段 encode（斜線保留），ref 一律是 feature/<JIRA_ID>。
+//
+// ⚠️ repoPath 不得來自使用者輸入未經檢查的值——token 讀得到整個 repo。
+//    目前只有兩個呼叫端：HTML_DIR + 已過 HTML_NAME_RE 的檔名，以及常數 PROGRESS_PATH。
 //
 // 用 contents API ＋ raw media type，而不是 raw.githubusercontent.com：
 // 前者對私人 repo 的認證方式與 dispatch 那條完全相同，後者的 token 行為另有一套。
 // raw media type 的單檔上限是 100 MB，遠高於 contents API 預設 JSON 的 1 MB。
-function fetchHtmlFromGitHub_(jiraId, fileName) {
+function fetchRepoFileFromGitHub_(jiraId, repoPath) {
   const props = PropertiesService.getScriptProperties();
   const token = props.getProperty('GITHUB_READ_TOKEN') || props.getProperty('GITHUB_TOKEN');
   if (!token) throw new Error('未在 Script Properties 設定 GITHUB_READ_TOKEN / GITHUB_TOKEN');
 
   const url = 'https://api.github.com/repos/' + AUGMA_GITHUB_REPO + '/contents/' +
-    HTML_DIR + '/' + encodeURIComponent(fileName) +
+    repoPath.split('/').map(encodeURIComponent).join('/') +
     '?ref=' + encodeURIComponent(BRANCH_PREFIX + jiraId);
 
   const res = UrlFetchApp.fetch(url, {
@@ -117,10 +137,77 @@ function fetchHtmlFromGitHub_(jiraId, fileName) {
   // GitHub 對無權限的私人資源一律回 404。後者是設定問題，所以仍記一筆，
   // 排查時才不會把「token 失效」誤認成「PO 點了舊連結」。
   if (code === 404) {
-    console.warn('GitHub 404：' + jiraId + '/' + fileName);
+    console.warn('GitHub 404：' + jiraId + ' ' + repoPath);
     return null;
   }
   throw new Error('GitHub 回應 HTTP ' + code + '：' + res.getContentText().slice(0, 300));
+}
+
+
+/**
+ * 讀同分支的 workspace/progress.json，回傳已答題的對照表：
+ *   { "Q-001": { answer, answered_by, answered_at }, ... }   （值為字串或 null）
+ * 沒有任何已答題時回 {}（前端可據此分辨「讀到了、但都還沒答」）。
+ *
+ * **任何失敗都回 null、只記一行 log、絕不拋例外**：這只是錦上添花的狀態顯示，
+ * progress.json 不存在（舊分支）、壞掉或結構改版，都不能讓清單頁本身打不開。
+ */
+function loadAnsweredMap_(jiraId) {
+  try {
+    const raw = fetchRepoFileFromGitHub_(jiraId, PROGRESS_PATH);
+    if (raw === null) return null;   // 404 已由 fetchRepoFileFromGitHub_ 記過
+
+    const data = JSON.parse(raw);
+    if (!data || typeof data !== 'object' || !Array.isArray(data.pending_questions)) {
+      console.warn('progress.json 結構不符（缺 pending_questions 陣列）：' + jiraId);
+      return null;
+    }
+
+    const out = {};
+    data.pending_questions.forEach(function (q) {
+      if (!q || typeof q !== 'object' || q.answered !== true) return;
+      if (typeof q.id !== 'string' || !q.id) return;
+      out[q.id] = {
+        answer: answeredField_(q.answer),
+        answered_by: answeredField_(q.answered_by),
+        answered_at: answeredField_(q.answered_at)
+      };
+    });
+    return out;
+  } catch (err) {
+    console.warn('讀取 progress.json 失敗，不注入已答狀態：' + jiraId + '：' +
+                 ((err && err.message) || err));
+    return null;
+  }
+}
+
+function answeredField_(v) {
+  if (v === null || v === undefined) return null;
+  if (typeof v === 'string') return v;
+  if (typeof v === 'object') return JSON.stringify(v);
+  return String(v);
+}
+
+
+/**
+ * 以 <script>window.__AUGMA_ANSWERED__ = {...};</script> 注入頁面：插在第一個
+ * </head> 之前（不分大小寫）；沒有 </head> 就擺在最前面。
+ *
+ * JSON 內的 `<` 一律轉成 <、U+2028/U+2029 轉成跳脫序列——答案是 PO 寫的
+ * 自由文字，含 `</script>` 時才不會把 script 斷開、讓後面的內容被當成 HTML 解析。
+ * 用 function 當 replace 的第二參數：字串形式會把答案裡的 `$&`、`$'` 當成特殊樣式。
+ */
+function injectAnsweredScript_(html, answered) {
+  const json = JSON.stringify(answered)
+    .replace(/</g, '\\u003c')
+    .replace(/\u2028/g, '\\u2028')
+    .replace(/\u2029/g, '\\u2029');
+  const tag = '<script>window.__AUGMA_ANSWERED__ = ' + json + ';</script>';
+  const headEnd = /<\/head\s*>/i;
+  if (headEnd.test(html)) {
+    return html.replace(headEnd, function (m) { return tag + m; });
+  }
+  return tag + html;
 }
 
 // ═══════════════════════════════════════════════════════════════════
