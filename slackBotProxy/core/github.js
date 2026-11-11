@@ -233,6 +233,62 @@ function dispatchWorkflow(payload) {
 //  由呼叫端降級運作：dispatch 是不可失敗的動作，不能被讀取失敗擋下。
 // ═══════════════════════════════════════════════════════════════════
 
+// ═══════════════════════════════════════════════════════════════════
+//  轉貼留言到委派出去的 GitHub Issue
+//
+//  messageDispatch 是**單向**的（runner → Slack），所以 alice 在 Issue 上的
+//  提問送得到 Slack thread，人的回覆卻回不去。這個函式補的就是那條回路。
+//
+//  為什麼由 GAS 直接貼、而不是 dispatch 給 augma 再由它貼：繞 augma 要起一個
+//  self-hosted job、checkout、跑 agent，就為了一次 POST /issues/{n}/comments。
+//  GAS 手上本來就有這顆 PAT（dispatchWorkflow 在用），直接打即可。
+//
+//  ⚠️ body 一定要帶 @104F2E-ALICE。shared-actions 的 issue_comment 守衛是
+//     contains(github.event.comment.body, '@104F2E-ALICE')——沒有這串就只是
+//     一則留言，alice 不會醒來。
+// ═══════════════════════════════════════════════════════════════════
+function commentOnIssue(repo, number, body) {
+  const githubToken = PropertiesService.getScriptProperties().getProperty('GITHUB_TOKEN');
+  if (!githubToken) {
+    console.error('❌ 未在 Script Properties 設定 GITHUB_TOKEN');
+    return false;
+  }
+  if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(String(repo || ''))) {
+    console.error('commentOnIssue: 非法的 repo:', repo);
+    return false;
+  }
+  const num = parseInt(number, 10);
+  if (!(num > 0)) {
+    console.error('commentOnIssue: 非法的 issue number:', number);
+    return false;
+  }
+
+  const url = `https://api.github.com/repos/${repo}/issues/${num}/comments`;
+  try {
+    const res = UrlFetchApp.fetch(url, {
+      method: 'post',
+      contentType: 'application/json',
+      headers: {
+        'Authorization': `token ${githubToken}`,
+        'Accept': 'application/vnd.github.v3+json',
+        'User-Agent': 'GAS-Alice-Proxy'
+      },
+      payload: JSON.stringify({ body: body }),
+      muteHttpExceptions: true
+    });
+    const code = res.getResponseCode();
+    if (code !== 201) {
+      console.error('commentOnIssue 失敗 HTTP ' + code + '：' + res.getContentText().slice(0, 300));
+      return false;
+    }
+    return true;
+  } catch (err) {
+    console.error('commentOnIssue 發生異常:', err);
+    return false;
+  }
+}
+
+
 function fetchProgress(jiraId) {
   const githubToken = PropertiesService.getScriptProperties().getProperty('GITHUB_TOKEN');
   if (!githubToken) {
