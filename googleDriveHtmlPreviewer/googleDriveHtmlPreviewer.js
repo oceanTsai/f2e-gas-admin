@@ -52,8 +52,8 @@ function doGet(e) {
           // 注入放在 rewriteLinks_ **之後**：注入的 JSON 是 PO 寫的自由文字，
           // 不該讓連結改寫的正規表達式有機會碰到它。
           if (CHECKLIST_NAME_RE.test(fileName)) {
-            const answered = loadAnsweredMap_(jiraId);
-            if (answered !== null) out = injectAnsweredScript_(out, answered);
+            const state = loadChecklistState_(jiraId);
+            if (state !== null) out = injectAnsweredScript_(out, state.answered, state.deferred);
           }
           return HtmlService.createHtmlOutput(out).setTitle(fileName);
         }
@@ -145,14 +145,28 @@ function fetchRepoFileFromGitHub_(jiraId, repoPath) {
 
 
 /**
- * 讀同分支的 workspace/progress.json，回傳已答題的對照表：
- *   { "Q-001": { answer, answered_by, answered_at }, ... }   （值為字串或 null）
- * 沒有任何已答題時回 {}（前端可據此分辨「讀到了、但都還沒答」）。
+ * 讀同分支的 workspace/progress.json，回傳補問清單頁要顯示的狀態：
+ *   {
+ *     answered: { "Q-001": { answer, answered_by, answered_at }, ... },
+ *     deferred: { "Q-002": { note, deferred_by, deferred_at }, ... }
+ *   }
+ * （值為字串或 null）。都沒有時兩者皆為 {}（前端可據此分辨「讀到了、但都還沒答」）。
+ *
+ * answered 的來源有兩處，**同一題以 pending_questions 為準**：
+ *   1. pending_questions[]：answered === true 的題（擋開工的題）。答案被修改過時
+ *      augma 會直接覆寫 answer，所以這裡讀到的就是最新答案，不必看 revision。
+ *   2. non_blocking_answers[]：kind === "question" 的題（不擋開工的題）。只收 Q- 開頭；
+ *      A- 開頭的是 AI 假設的同意／不同意，頁面上是 checkbox，不走已答鎖定。
+ *      答案以「待討論」開頭的不算已答（防禦：那不是答案）。
+ *   回填後留在清單「已回答區」的題靠這兩處才看得到原答案、才有東西可以改。
+ *
+ * deferred 取自 discussion_list[] 中 resolved !== true 的項目——PO 選了「待討論」、
+ * 還沒給正式答案的題。頁面據此在重開時還原討論清單。
  *
  * **任何失敗都回 null、只記一行 log、絕不拋例外**：這只是錦上添花的狀態顯示，
  * progress.json 不存在（舊分支）、壞掉或結構改版，都不能讓清單頁本身打不開。
  */
-function loadAnsweredMap_(jiraId) {
+function loadChecklistState_(jiraId) {
   try {
     const raw = fetchRepoFileFromGitHub_(jiraId, PROGRESS_PATH);
     if (raw === null) return null;   // 404 已由 fetchRepoFileFromGitHub_ 記過
@@ -163,22 +177,55 @@ function loadAnsweredMap_(jiraId) {
       return null;
     }
 
-    const out = {};
+    const answered = {};
+    if (Array.isArray(data.non_blocking_answers)) {
+      data.non_blocking_answers.forEach(function (q) {
+        if (!q || typeof q !== 'object' || q.kind !== 'question') return;
+        if (typeof q.id !== 'string' || !/^Q-/.test(q.id)) return;
+        const ans = answeredField_(q.answer);
+        if (ans === null || !ans.trim() || /^\s*待討論/.test(ans)) return;
+        answered[q.id] = {
+          answer: ans,
+          answered_by: answeredField_(q.answered_by),
+          answered_at: answeredField_(q.answered_at)
+        };
+      });
+    }
+    // 後跑＝覆蓋前者：同一題兩處都有時以 pending_questions 為準
     data.pending_questions.forEach(function (q) {
       if (!q || typeof q !== 'object' || q.answered !== true) return;
       if (typeof q.id !== 'string' || !q.id) return;
-      out[q.id] = {
+      answered[q.id] = {
         answer: answeredField_(q.answer),
         answered_by: answeredField_(q.answered_by),
         answered_at: answeredField_(q.answered_at)
       };
     });
-    return out;
+
+    const deferred = {};
+    if (Array.isArray(data.discussion_list)) {
+      data.discussion_list.forEach(function (d) {
+        if (!d || typeof d !== 'object' || d.resolved === true) return;
+        if (typeof d.id !== 'string' || !d.id) return;
+        deferred[d.id] = {
+          note: answeredField_(d.note),
+          deferred_by: answeredField_(d.by),
+          deferred_at: answeredField_(d.at)
+        };
+      });
+    }
+    return { answered: answered, deferred: deferred };
   } catch (err) {
     console.warn('讀取 progress.json 失敗，不注入已答狀態：' + jiraId + '：' +
                  ((err && err.message) || err));
     return null;
   }
+}
+
+// 舊名保留：只要已答對照表的呼叫端（與既有測試）不必跟著改。
+function loadAnsweredMap_(jiraId) {
+  const state = loadChecklistState_(jiraId);
+  return state === null ? null : state.answered;
 }
 
 function answeredField_(v) {
@@ -197,12 +244,18 @@ function answeredField_(v) {
  * 自由文字，含 `</script>` 時才不會把 script 斷開、讓後面的內容被當成 HTML 解析。
  * 用 function 當 replace 的第二參數：字串形式會把答案裡的 `$&`、`$'` 當成特殊樣式。
  */
-function injectAnsweredScript_(html, answered) {
-  const json = JSON.stringify(answered)
-    .replace(/</g, '\\u003c')
-    .replace(/\u2028/g, '\\u2028')
-    .replace(/\u2029/g, '\\u2029');
-  const tag = '<script>window.__AUGMA_ANSWERED__ = ' + json + ';</script>';
+function injectAnsweredScript_(html, answered, deferred) {
+  const esc = function (obj) {
+    return JSON.stringify(obj)
+      .replace(/</g, '\\u003c')
+      .replace(/\u2028/g, '\\u2028')
+      .replace(/\u2029/g, '\\u2029');
+  };
+  // __AUGMA_DEFERRED__ 只在**真的有待討論的題**時才注入：沒有時頁面輸出與加這個功能
+  // 之前逐字相同（checklist.js 對「物件不存在」與「空物件」的處理一樣）。
+  // 兩個物件各自一個 <script>：第一個標籤的形狀維持與只有已答狀態時完全相同。
+  const tag = '<script>window.__AUGMA_ANSWERED__ = ' + esc(answered) + ';</script>' +
+    (deferred && Object.keys(deferred).length ? '<script>window.__AUGMA_DEFERRED__ = ' + esc(deferred) + ';</script>' : '');
   const headEnd = /<\/head\s*>/i;
   if (headEnd.test(html)) {
     return html.replace(headEnd, function (m) { return tag + m; });
@@ -291,7 +344,8 @@ function submitChecklistAnswers(payload) {
     return { ok: false, error: '系統尚未設定 GITHUB_TOKEN，請聯絡負責人（重試不會有幫助）' };
   }
 
-  const qids = _scanQidsForDedup_(batch);
+  const scanned = _scanAnswersForDedup_(batch);
+  const qids = scanned.map(function (x) { return x.qid; });
   if (!qids.length) {
     // 頁面組出來的形狀就是上面那條樣式認得的，走到這裡代表兩邊已經對不上了
     // （多半是 checklist.js 的 buildReply 改過而這裡沒跟上）。
@@ -301,8 +355,12 @@ function submitChecklistAnswers(payload) {
   // ── 為什麼要 LockService ────────────────────────────────────────
   // 同一份清單在兩個視窗（或兩個人）同時按下送出時，兩邊會**雙雙**讀到空快取、
   // 雙雙 dispatch。CacheService 沒有「讀了就鎖住」的原子操作，光靠它擋不住這一瞬間。
-  // 後果不是答案錯亂（augma 端對已答的題是冪等的），而是第二次 dispatch 會把
-  // 正在跑的 agent 砍掉——phase job 是 cancel-in-progress。
+  // 後果不是答案錯亂（augma 端對「同一題同一個答案」是冪等的），而是第二次 dispatch
+  // 會把正在跑的 agent 砍掉——phase job 是 cancel-in-progress。
+  //
+  // ⚠️ 去重鍵含答案內容（見 _answerDedupKey_）：同一題**換了答案**不算重複，會放行。
+  //    這是「送出後可以修改答案」「選了待討論之後再正式回答」的前提。代價是 PO 在
+  //    pipeline 還在跑的時候改答案，會砍掉正在跑的那一階——augma 會帶著新答案重跑。
   //
   // 前端的按鈕 disabled 只鎖得住同一個頁面實例，跨視窗完全無效，所以這道鎖必須
   // 在伺服器端。getScriptLock 是整個 script 共用的，正是需要的粒度。
@@ -313,11 +371,13 @@ function submitChecklistAnswers(payload) {
 
   try {
     const cache = CacheService.getScriptCache();
-    const already = qids.filter(function (qid) { return !!cache.get(_answerKey_(jiraId, qid)); });
+    const keyOf = {};
+    scanned.forEach(function (x) { keyOf[x.qid] = _answerDedupKey_(jiraId, x.qid, x.text); });
+    const already = qids.filter(function (qid) { return !!cache.get(keyOf[qid]); });
 
     if (already.length === qids.length) {
       // 全部都收過了＝多半是重新整理或另一個視窗已經送過。不是錯誤，但也不能再送。
-      return { ok: true, applied: 0, note: '這些題稍早都已經收下過了，未重複送出。' };
+      return { ok: true, applied: 0, note: '這些題稍早都已經收下過同樣的答案，未重複送出。' };
     }
 
     const cut = _truncateUtf8ForPayload_(batch, BATCH_PAYLOAD_MAX_BYTES);
@@ -336,12 +396,15 @@ function submitChecklistAnswers(payload) {
 
     // 先寫快取再 dispatch。順序反過來的話，dispatch 與寫快取之間又是一個窗口——
     // 那正是這把鎖要消滅的東西，別在鎖裡面自己重新製造一個。
-    qids.forEach(function (qid) { cache.put(_answerKey_(jiraId, qid), answeredBy, ANSWER_CACHE_TTL); });
+    // 只寫這次真的要送的題：稍早收過的那幾顆鍵是別次送出留下的，不歸這次管
+    // （下面 dispatch 失敗時要收回的也只有這次寫的）。
+    const fresh = qids.filter(function (qid) { return already.indexOf(qid) === -1; });
+    fresh.forEach(function (qid) { cache.put(keyOf[qid], answeredBy, ANSWER_CACHE_TTL); });
 
     const sent = _dispatchResumeBatch_(jiraId, pipeline, cut.text, answeredBy);
     if (!sent.ok) {
       // 快取一定要收回，否則這批題號會被記成「已收下」，PO 重按也不會再送。
-      qids.forEach(function (qid) { cache.remove(_answerKey_(jiraId, qid)); });
+      fresh.forEach(function (qid) { cache.remove(keyOf[qid]); });
       return {
         ok: false,
         error: '答案沒有送出：' + sent.detail +
@@ -354,7 +417,7 @@ function submitChecklistAnswers(payload) {
     // （notify-answer-result.sh → messageDispatch 的 answer_result）。
     const res = { ok: true, applied: qids.length - already.length };
     if (already.length) {
-      res.note = '其中 ' + already.join('、') + ' 稍早已經收過，這次不會重複寫入。';
+      res.note = '其中 ' + already.join('、') + ' 稍早已經收過同樣的答案，這次不會重複寫入。';
     }
     if (cut.truncated) {
       res.note = (res.note ? res.note + ' ' : '') +
@@ -378,18 +441,52 @@ function _answerKey_(jiraId, questionId) {
 }
 
 
-// 撈出這份答案涵蓋哪些題號（正規化成 Q-001 三位數）。只撈題號、不解讀答案。
-function _scanQidsForDedup_(text) {
+// 清單頁的去重鍵：題號之外再加「那一行答案文字」的雜湊。
+//
+// 只看題號的話，同一題 6 小時內只收得進第一個答案——改答案、待討論後再正式回答
+// 都會被當成重複擋掉。加上答案雜湊後：同題同答案＝重複（重新整理、另一個視窗），
+// 同題不同答案＝新的一次送出。
+//
+// ⚠️ 這裡刻意**不沿用 _answerKey_**（slackBotProxy 那顆鍵只有題號）。兩邊哪天要合回
+//    同一把鎖時，要一起決定鍵的形狀；在那之前 card 模式不使用，兩顆快取互不相見。
+// ⚠️ 仍然**不解讀答案**：雜湊的是冒號後面的原文（去頭尾空白），不判斷它選了哪個選項。
+function _answerDedupKey_(jiraId, questionId, answerText) {
+  return 'ans_' + jiraId + '_' + questionId + '_' + _fnv1a_(String(answerText || '').trim());
+}
+
+// FNV-1a 32-bit，回 8 位十六進位。不用 Utilities.computeDigest 是因為這裡只需要
+// 「同字串同鍵」，不需要密碼學強度；純 JS 也讓 node 的回歸測試不必另做替身。
+function _fnv1a_(str) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 0x01000193) >>> 0;
+  }
+  return ('0000000' + h.toString(16)).slice(-8);
+}
+
+
+// 撈出這份答案涵蓋哪些題號（正規化成 Q-001 三位數）與各自那一行冒號後的原文。
+// 同一題出現多次取**最後一筆**——與 augma 的 answer-batch 同一條規則，否則這裡
+// 雜湊的會是 augma 實際不採用的那一行。只撈、不解讀答案。
+function _scanAnswersForDedup_(text) {
   const lines = String(text == null ? '' : text).split('\n');
-  const out = [];
+  const order = [];
+  const byQid = {};
   for (let i = 0; i < lines.length; i++) {
     const m = lines[i].match(QID_LINE_RE);
     if (!m) continue;
     const n = m[1].replace(/^[Qq][-－]?/, '');
     const qid = 'Q-' + ('00' + n).slice(-3);
-    if (out.indexOf(qid) === -1) out.push(qid);
+    if (order.indexOf(qid) === -1) order.push(qid);
+    byQid[qid] = lines[i].slice(m[0].length).trim();
   }
-  return out;
+  return order.map(function (qid) { return { qid: qid, text: byQid[qid] }; });
+}
+
+// 只要題號的呼叫端用這個。
+function _scanQidsForDedup_(text) {
+  return _scanAnswersForDedup_(text).map(function (x) { return x.qid; });
 }
 
 

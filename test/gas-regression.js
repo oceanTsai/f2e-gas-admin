@@ -988,6 +988,9 @@ console.log('\n[3d+] googleDriveHtmlPreviewer — 補問清單直送（digest �
   ].join('\\n');
   const ARGS = { jira_id:'VIPOP-46703', pipeline:'ra-pipeline', answer_batch: PASTE };
   const cache = CacheService.getScriptCache();
+  // 去重鍵含答案內容：題號 + 那一行冒號後原文的雜湊
+  const K1 = _answerDedupKey_('VIPOP-46703','Q-001','A. 甲案');
+  const K2 = _answerDedupKey_('VIPOP-46703','Q-002','B. 乙案');
 
   // ── 送出 ────────────────────────────────────────────────────────
   let r = submitChecklistAnswers(ARGS);
@@ -1008,7 +1011,7 @@ console.log('\n[3d+] googleDriveHtmlPreviewer — 補問清單直送（digest �
   ok('帶上 source: checklist（workflow 據此補發「收到了」回執）');
 
   assert.strictEqual(sent[0].body.client_payload.user, 'po@104.com.tw');
-  assert.strictEqual(cache.get(_answerKey_('VIPOP-46703','Q-001')), 'po@104.com.tw');
+  assert.strictEqual(cache.get(K1), 'po@104.com.tw');
   ok('作答者取 Google 帳號 email，原樣寫入（answered_by 兩種格式都收）');
 
   // AI 假設的 A-00X **不可**被當成題號寫進去重鍵，否則那些鍵永遠不會被清掉
@@ -1023,9 +1026,98 @@ console.log('\n[3d+] googleDriveHtmlPreviewer — 補問清單直送（digest �
   assert.strictEqual(sent.length, 0, '重送不該再 dispatch（會砍掉正在跑的 agent）');
   ok('另一個視窗／重新整理後再送 → 去重快取擋下，不重複 dispatch');
 
+  // ── 改答案：同一題換了答案不算重複 ────────────────────────────────
+  assert.notStrictEqual(K1, _answerDedupKey_('VIPOP-46703','Q-001','B. 乙案'));
+  assert.strictEqual(K1, _answerDedupKey_('VIPOP-46703','Q-001','  A. 甲案  '), '頭尾空白不影響');
+  sent.length = 0;
+  r = submitChecklistAnswers({ jira_id:'VIPOP-46703', pipeline:'ra-pipeline',
+    answer_batch: '- **Q-001**: B. 乙案' });
+  assert.strictEqual(r.ok, true);
+  assert.strictEqual(r.applied, 1);
+  assert.strictEqual(sent.length, 1, '改答案必須送得出去');
+  ok('同一題 6 小時內換了答案 → 放行（送出後可修改答案的前提）');
+
+  sent.length = 0;
+  r = submitChecklistAnswers({ jira_id:'VIPOP-46703', pipeline:'ra-pipeline',
+    answer_batch: '- **Q-001**: B. 乙案' });
+  assert.strictEqual(r.applied, 0);
+  assert.strictEqual(sent.length, 0);
+  ok('改過的答案原樣重送 → 仍被去重擋下');
+
+  // ── 待討論 → 之後正式回答 ────────────────────────────────────────
+  sent.length = 0;
+  r = submitChecklistAnswers({ jira_id:'VIPOP-46703', pipeline:'ra-pipeline',
+    answer_batch: '- **Q-003**: 待討論：要問法務' });
+  assert.strictEqual(sent.length, 1);
+  r = submitChecklistAnswers({ jira_id:'VIPOP-46703', pipeline:'ra-pipeline',
+    answer_batch: '- **Q-003**: A. 甲案' });
+  assert.strictEqual(r.applied, 1);
+  assert.strictEqual(sent.length, 2, '待討論之後的正式答案不可被擋');
+  ok('先送「待討論」、之後正式回答 → 兩次都送得出去');
+
+  // ── 一批裡部分收過：只寫、只收回這次新送的鍵 ───────────────────────
+  sent.length = 0;
+  httpCode = 500;
+  r = submitChecklistAnswers({ jira_id:'VIPOP-46703', pipeline:'ra-pipeline',
+    answer_batch: '- **Q-002**: B. 乙案\\n- **Q-004**: A. 甲案' });
+  httpCode = 204;
+  assert.strictEqual(r.ok, false);
+  assert.strictEqual(cache.get(K2), 'po@104.com.tw', '稍早收過的鍵不可被這次的失敗連帶收回');
+  assert.strictEqual(cache.get(_answerDedupKey_('VIPOP-46703','Q-004','A. 甲案')), null);
+  ok('dispatch 失敗只收回這次新寫的鍵，不動稍早收過的題');
+
+  // ── 同一題在一批裡出現兩次：取最後一筆（與 augma answer-batch 一致）──
+  const sc = _scanAnswersForDedup_('- **Q-001**: A. 甲案\\n- **Q-2**: x\\n- **Q-001**: C. 其他');
+  assert.deepStrictEqual(sc, [{ qid:'Q-001', text:'C. 其他' }, { qid:'Q-002', text:'x' }]);
+  assert.deepStrictEqual(_scanQidsForDedup_('- **Q-001**: A\\n- A-001: 同意'), ['Q-001']);
+  ok('同題多行取最後一筆；題號正規化與舊版相同');
+
+  // ── 注入：最新答案、不擋開工的題、待討論 ───────────────────────────
+  const PROG = {
+    pending_questions: [
+      { id:'Q-001', answered:true, answer:'B. 乙案', previous_answer:'A. 甲案', revision:1,
+        answered_by:'po@104.com.tw', answered_at:'t2' },
+      { id:'Q-002', answered:false, deferred:true, deferred_note:'要問法務' }
+    ],
+    non_blocking_answers: [
+      { id:'Q-001', kind:'question', answer:'舊的不該贏' },
+      { id:'Q-010', kind:'question', answer:'A. 甲案', answered_by:'u', answered_at:'t1' },
+      { id:'Q-011', kind:'question', answer:'待討論：晚點' },
+      { id:'A-001', kind:'assumption', answer:'✓ 同意' }
+    ],
+    discussion_list: [
+      { id:'Q-002', note:'要問法務', by:'po@104.com.tw', at:'t3', resolved:false },
+      { id:'Q-005', note:'', by:'u', at:'t0', resolved:true }
+    ]
+  };
+  const savedRepoFetch = fetchRepoFileFromGitHub_;
+  fetchRepoFileFromGitHub_ = () => JSON.stringify(PROG);
+  let st = loadChecklistState_('VIPOP-46703');
+  assert.deepStrictEqual(Object.keys(st.answered).sort(), ['Q-001','Q-010']);
+  assert.strictEqual(st.answered['Q-001'].answer, 'B. 乙案', '改答後取最新答案，pending_questions 為準');
+  assert.deepStrictEqual(st.deferred, { 'Q-002': { note:'要問法務', deferred_by:'po@104.com.tw', deferred_at:'t3' } });
+  assert.deepStrictEqual(loadAnsweredMap_('VIPOP-46703'), st.answered);
+  ok('已答對照表：取最新答案、含不擋開工的題、排除 AI 假設與待討論');
+  ok('待討論對照表：只含尚未結案的項目');
+
+  fetchRepoFileFromGitHub_ = () => JSON.stringify({ pending_questions: [] });
+  st = loadChecklistState_('VIPOP-46703');
+  assert.deepStrictEqual(st, { answered:{}, deferred:{} }, '舊版 progress.json（沒有新欄位）要能讀');
+  fetchRepoFileFromGitHub_ = () => '{壞掉';
+  assert.strictEqual(loadChecklistState_('VIPOP-46703'), null);
+  fetchRepoFileFromGitHub_ = savedRepoFetch;
+  ok('舊結構照常運作；壞掉的 progress.json 回 null 不拋例外');
+
+  let page = injectAnsweredScript_('<head></head><body>', { 'Q-001': { answer:'</script>' } });
+  assert.ok(page.indexOf('__AUGMA_DEFERRED__') < 0, '沒傳 deferred 時輸出與舊版相同');
+  assert.ok(page.indexOf('</script></head>') > 0 && page.indexOf('\\\\u003c/script>') > 0);
+  page = injectAnsweredScript_('<head></head>', {}, { 'Q-002': { note:'<b>' } });
+  assert.ok(page.indexOf('<script>window.__AUGMA_DEFERRED__ = {"Q-002":{"note":"\\\\u003cb>"}};</script>') > 0);
+  ok('注入 __AUGMA_DEFERRED__，內容同樣跳脫 <');
+
   // ── 兩個視窗「同時」送出：靠 LockService，不是靠快取 ────────────────
-  cache.remove(_answerKey_('VIPOP-46703','Q-001'));
-  cache.remove(_answerKey_('VIPOP-46703','Q-002'));
+  cache.remove(K1);
+  cache.remove(K2);
   sent.length = 0;
   lockHeld = true;
   r = submitChecklistAnswers(ARGS);
@@ -1044,8 +1136,8 @@ console.log('\n[3d+] googleDriveHtmlPreviewer — 補問清單直送（digest �
 
   // ── GitHub 回非 204：快取要收回，讓人能重試 ────────────────────────
   const reset2 = () => {
-    cache.remove(_answerKey_('VIPOP-46703','Q-001'));
-    cache.remove(_answerKey_('VIPOP-46703','Q-002'));
+    cache.remove(K1);
+    cache.remove(K2);
     sent.length = 0;
   };
 
@@ -1053,7 +1145,7 @@ console.log('\n[3d+] googleDriveHtmlPreviewer — 補問清單直送（digest �
   httpCode = 500;
   r = submitChecklistAnswers(ARGS);
   assert.strictEqual(r.ok, false);
-  assert.strictEqual(cache.get(_answerKey_('VIPOP-46703','Q-001')), null, 'dispatch 失敗必須把快取收回');
+  assert.strictEqual(cache.get(K1), null, 'dispatch 失敗必須把快取收回');
   assert.ok(r.error.indexOf('稍後再試') >= 0, '暫時性失敗要叫人重試');
   httpCode = 204;
   reset2();
@@ -1093,7 +1185,7 @@ console.log('\n[3d+] googleDriveHtmlPreviewer — 補問清單直送（digest �
   UrlFetchApp.fetch = savedFetch;
   assert.strictEqual(r.ok, false);
   assert.ok(r.error.indexOf('script.external_request') >= 0, '缺哪個 scope 必須看得到');
-  assert.strictEqual(cache.get(_answerKey_('VIPOP-46703','Q-001')), null, '例外後也要收回快取');
+  assert.strictEqual(cache.get(K1), null, '例外後也要收回快取');
   ok('呼叫時拋例外 → 原樣帶回訊息（缺權限時直接看得到缺哪個 scope）');
 
   // ── 沒有 GITHUB_TOKEN ──────────────────────────────────────────
@@ -1104,7 +1196,7 @@ console.log('\n[3d+] googleDriveHtmlPreviewer — 補問清單直送（digest �
   assert.ok(r.error.indexOf('GITHUB_TOKEN') >= 0, '要直接講出是哪個設定沒設');
   assert.ok(r.error.indexOf('重試不會有幫助') >= 0);
   assert.strictEqual(sent.length, 0, '沒 token 時不該白打一次 GitHub');
-  assert.strictEqual(cache.get(_answerKey_('VIPOP-46703','Q-001')), null, '不可留下「已收下」的快取');
+  assert.strictEqual(cache.get(K1), null, '不可留下「已收下」的快取');
   ok('沒設 GITHUB_TOKEN → 當場點名該設定，不打 API、不留快取、不叫人重試');
   `);
 }
